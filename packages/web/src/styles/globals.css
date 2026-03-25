@@ -1,0 +1,128 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* ============================================
+     CLASSIC SKIN - Dark (default)
+     ============================================ */
+  :root {
+    --qod-bg: #0f1117;
+    --qod-surface: #1a1d27;
+    --qod-text-primary: #f1f5f9;
+    --qod-text-secondary: #94a3b8;
+    --qod-text-muted: #64748b;
+    --qod-hover-bg: rgba(255, 255, 255, 0.05);
+    --qod-sidebar-bg: #1a1d27;
+    --qod-card-shadow: none;
+
+    /* RGB channels for alpha modifier support */
+    --qod-border: 42 45 58;
+    --qod-accent: 99 102 241;
+    --rag-green: 16 185 129;
+    --rag-amber: 245 158 11;
+    --rag-red: 239 68 68;
+  }
+
+  /* ============================================
+     CLASSIC SKIN - Light
+     ============================================ */
+  .light {
+    --qod-bg: #f1f5f9;
+    --qod-surface: #ffffff;
+    --qod-text-primary: #0f172a;
+    --qod-text-secondary: #334155;
+    --qod-text-muted: #64748b;
+    --qod-hover-bg: rgba(0, 0, 0, 0.04);
+    --qod-sidebar-bg: #ffffff;
+    --qod-card-shadow: none;
+
+    --qod-border: 226 232 240;
+    --qod-accent: 99 102 241;
+    --rag-green: 16 185 129;
+    --rag-amber: 245 158 11;
+    --rag-red: 239 68 68;
+  }
+
+  /* ============================================
+     MODERN SKIN - Dark (Atlassian-inspired)
+     ============================================ */
+  .skin-modern {
+    --qod-bg: #1C1C1E;
+    --qod-surface: #2A2A2D;
+    --qod-text-primary: #DEDFE1;
+    --qod-text-secondary: #A9ABAF;
+    --qod-text-muted: #7E8188;
+    --qod-hover-bg: rgba(255, 255, 255, 0.06);
+    --qod-sidebar-bg: #161618;
+    --qod-card-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 1px rgba(0, 0, 0, 0.25);
+
+    --qod-border: 55 57 62;
+    --qod-accent: 87 157 255;
+    --rag-green: 75 206 151;
+    --rag-amber: 245 167 0;
+    --rag-red: 248 113 104;
+
+    --font-inter: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Ubuntu, sans-serif;
+  }
+
+  /* ============================================
+     MODERN SKIN - Light (Atlassian-inspired)
+     ============================================ */
+  .skin-modern.light,
+  .light.skin-modern {
+    --qod-bg: #F7F8F9;
+    --qod-surface: #FFFFFF;
+    --qod-text-primary: #292A2E;
+    --qod-text-secondary: #505258;
+    --qod-text-muted: #7D818A;
+    --qod-hover-bg: rgba(0, 0, 0, 0.04);
+    --qod-sidebar-bg: #F7F8F9;
+    --qod-card-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 1px rgba(0, 0, 0, 0.04);
+
+    --qod-border: 221 222 225;
+    --qod-accent: 24 104 219;
+    --rag-green: 34 160 107;
+    --rag-amber: 207 159 2;
+    --rag-red: 201 55 44;
+  }
+
+  body {
+    background-color: var(--qod-bg);
+    color: var(--qod-text-primary);
+    @apply antialiased;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background-color: var(--qod-bg);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: rgb(var(--qod-border));
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-500;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--qod-border)) var(--qod-bg);
+  }
+}
+
+@layer components {
+  .card {
+    background-color: var(--qod-surface);
+    border: 1px solid rgb(var(--qod-border));
+    box-shadow: var(--qod-card-shadow);
+    @apply rounded-lg;
+  }
+}

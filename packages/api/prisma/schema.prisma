@@ -1,0 +1,589 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Organization ────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String   @unique
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users    User[]
+  projects Project[]
+
+  @@map("organizations")
+}
+
+// ─── User ────────────────────────────────────────────────────
+
+enum GlobalRole {
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+model User {
+  id        String     @id @default(uuid()) @db.Uuid
+  orgId     String     @map("org_id") @db.Uuid
+  email     String     @unique
+  name      String
+  avatarUrl String?    @map("avatar_url")
+  role      GlobalRole @default(MEMBER)
+  password  String?    // hashed, null for SSO-only
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  organization     Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  projectMembers   ProjectMember[]
+  dashboardLayouts DashboardLayout[]
+  auditLogs        AuditLog[]
+  notifications    Notification[]
+
+  @@map("users")
+}
+
+// ─── Project ─────────────────────────────────────────────────
+
+model Project {
+  id            String    @id @default(uuid()) @db.Uuid
+  orgId         String    @map("org_id") @db.Uuid
+  name          String
+  slug          String
+  description   String?
+  settings      Json      @default("{}")
+  retentionDays Int       @default(365) @map("retention_days")
+  demoMode      Boolean   @default(false) @map("demo_mode")
+  deletedAt     DateTime? @map("deleted_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  organization     Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  members          ProjectMember[]
+  connectorConfigs ConnectorConfig[]
+  featureAreas     FeatureArea[]
+  testCases        TestCase[]
+  testRuns         TestRun[]
+  defects          Defect[]
+  epics            Epic[]
+  stories          Story[]
+  pipelineRuns     PipelineRun[]
+  kpiSnapshots     KPISnapshot[]
+  kpiTargets       KPITarget[]
+  alertRules       AlertRule[]
+  auditLogs        AuditLog[]
+
+  @@unique([orgId, slug])
+  @@map("projects")
+}
+
+// ─── Project Membership ──────────────────────────────────────
+
+enum ProjectRole {
+  MANAGER
+  MEMBER
+  VIEWER
+}
+
+model ProjectMember {
+  id        String      @id @default(uuid()) @db.Uuid
+  projectId String      @map("project_id") @db.Uuid
+  userId    String      @map("user_id") @db.Uuid
+  role      ProjectRole @default(MEMBER)
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@map("project_members")
+}
+
+// ─── Connector Config ────────────────────────────────────────
+
+enum ConnectorType {
+  GITHUB
+  TESTRAIL
+  JIRA
+  JIRA_STORIES
+  JUNIT_XML
+  TESTNG_XML
+}
+
+enum ConnectorStatus {
+  ACTIVE
+  PAUSED
+  ERROR
+  SYNCING
+}
+
+model ConnectorConfig {
+  id            String          @id @default(uuid()) @db.Uuid
+  projectId     String          @map("project_id") @db.Uuid
+  connectorType ConnectorType   @map("connector_type")
+  name          String          // e.g. "GitHub - my-org/my-repo"
+  credentials   Json            @default("{}") // encrypted at app level
+  fieldMapping  Json            @default("{}") @map("field_mapping")
+  syncSchedule  String          @default("*/15 * * * *") @map("sync_schedule") // cron
+  syncTimezone  String          @default("UTC") @map("sync_timezone")
+  status        ConnectorStatus @default(ACTIVE)
+  lastSyncAt    DateTime?       @map("last_sync_at")
+  lastSyncError String?         @map("last_sync_error")
+  syncCursor    Json?           @map("sync_cursor") // bookmark for incremental sync
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("connector_configs")
+}
+
+// ─── Feature Area ────────────────────────────────────────────
+
+model FeatureArea {
+  id              String @id @default(uuid()) @db.Uuid
+  projectId       String @map("project_id") @db.Uuid
+  name            String
+  externalMapping String @default("") @map("external_mapping") // Jira component / TestRail section
+  color           String @default("#6366f1")
+
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  testCases TestCase[]
+  defects   Defect[]
+
+  @@unique([projectId, name])
+  @@map("feature_areas")
+}
+
+// ─── Test Case ───────────────────────────────────────────────
+
+enum TestType {
+  MANUAL
+  AUTOMATED
+  BDD
+}
+
+enum AutomationStatus {
+  AUTOMATED
+  NOT_AUTOMATED
+  NEEDS_UPDATE
+}
+
+model TestCase {
+  id               String           @id @default(uuid()) @db.Uuid
+  projectId        String           @map("project_id") @db.Uuid
+  externalId       String?          @map("external_id")
+  title            String
+  type             TestType         @default(AUTOMATED)
+  automationStatus AutomationStatus @default(AUTOMATED) @map("automation_status")
+  featureAreaId    String?          @map("feature_area_id") @db.Uuid
+  tags             String[]         @default([])
+  source           String           @default("manual") // testrail, jira, junit-xml, testng-xml, manual
+  suiteName        String?          @map("suite_name")
+  className        String?          @map("class_name")
+  filePath         String?          @map("file_path")
+  references       String?          // external refs (e.g. Jira tickets: "PS-2865, PS-3001")
+  testRailType     String?          @map("testrail_type") // TestRail case type name (e.g. "Regression", "Smoke & Sanity")
+  firstSeenAt      DateTime         @default(now()) @map("first_seen_at")
+  lastExecutedAt   DateTime?        @map("last_executed_at")
+  deletedAt        DateTime?        @map("deleted_at")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  featureArea FeatureArea? @relation(fields: [featureAreaId], references: [id], onDelete: SetNull)
+  testResults TestResult[]
+  defects     DefectTestLink[]
+
+  @@unique([projectId, externalId, source])
+  @@index([projectId, featureAreaId])
+  @@index([projectId, automationStatus])
+  @@map("test_cases")
+}
+
+// ─── Test Run ────────────────────────────────────────────────
+
+enum TriggerType {
+  CI_PUSH
+  PR
+  SCHEDULE
+  MANUAL
+  WEBHOOK
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  PASSED
+  FAILED
+  CANCELLED
+  ERRORED
+}
+
+model TestRun {
+  id            String      @id @default(uuid()) @db.Uuid
+  projectId     String      @map("project_id") @db.Uuid
+  externalId    String?     @map("external_id")
+  name          String?
+  triggerType   TriggerType @default(MANUAL) @map("trigger_type")
+  branch        String?
+  sha           String?
+  environment   String?
+  startedAt     DateTime    @default(now()) @map("started_at")
+  finishedAt    DateTime?   @map("finished_at")
+  durationMs    Int?        @map("duration_ms")
+  status        RunStatus   @default(QUEUED)
+  totalTests    Int         @default(0) @map("total_tests")
+  passedCount   Int         @default(0) @map("passed_count")
+  failedCount   Int         @default(0) @map("failed_count")
+  skippedCount  Int         @default(0) @map("skipped_count")
+  erroredCount  Int         @default(0) @map("errored_count")
+  flakyCount    Int         @default(0) @map("flaky_count")
+  isRerun       Boolean     @default(false) @map("is_rerun")
+  originalRunId String?     @map("original_run_id") @db.Uuid
+  pipelineRunId String?     @map("pipeline_run_id") @db.Uuid
+  source        String      @default("manual") // github, testrail, junit-xml, testng-xml
+  reportUrl     String?     @map("report_url")
+  deletedAt     DateTime?   @map("deleted_at")
+  createdAt     DateTime    @default(now()) @map("created_at")
+
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  pipelineRun PipelineRun? @relation(fields: [pipelineRunId], references: [id], onDelete: SetNull)
+  testResults TestResult[]
+
+  @@unique([projectId, externalId, source])
+  @@index([projectId, startedAt])
+  @@index([projectId, status])
+  @@index([projectId, branch])
+  @@map("test_runs")
+}
+
+// ─── Test Result ─────────────────────────────────────────────
+
+enum TestResultStatus {
+  PASSED
+  FAILED
+  SKIPPED
+  ERROR
+  FLAKY
+}
+
+model TestResult {
+  id            String           @id @default(uuid()) @db.Uuid
+  runId         String           @map("run_id") @db.Uuid
+  testCaseId    String           @map("test_case_id") @db.Uuid
+  status        TestResultStatus
+  durationMs    Int?             @map("duration_ms")
+  errorMessage  String?          @map("error_message")
+  stackTrace    String?          @map("stack_trace")
+  screenshotUrl String?          @map("screenshot_url")
+  retryIndex    Int              @default(0) @map("retry_index")
+  metadata      Json             @default("{}")
+  createdAt     DateTime         @default(now()) @map("created_at")
+
+  run      TestRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  testCase TestCase @relation(fields: [testCaseId], references: [id], onDelete: Cascade)
+
+  @@index([runId, status])
+  @@index([testCaseId, createdAt])
+  @@map("test_results")
+}
+
+// ─── Defect ──────────────────────────────────────────────────
+
+enum Severity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum Priority {
+  P0
+  P1
+  P2
+  P3
+}
+
+enum DefectStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+  REOPENED
+}
+
+model Defect {
+  id            String       @id @default(uuid()) @db.Uuid
+  projectId     String       @map("project_id") @db.Uuid
+  externalId    String?      @map("external_id")
+  title         String
+  url           String?
+  severity      Severity     @default(MEDIUM)
+  priority      Priority     @default(P2)
+  status        DefectStatus @default(OPEN)
+  component     String?
+  featureAreaId String?      @map("feature_area_id") @db.Uuid
+  isEscaped     Boolean      @default(false) @map("is_escaped")
+  reopenCount   Int          @default(0) @map("reopen_count")
+  assignee      String?
+  labels        String[]     @default([])
+  createdAt     DateTime     @default(now()) @map("created_at")
+  resolvedAt    DateTime?    @map("resolved_at")
+  closedAt      DateTime?    @map("closed_at")
+  source        String       @default("manual") // jira, github, linear
+  changelog     Json         @default("[]") // state transitions with timestamps
+  deletedAt     DateTime?    @map("deleted_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  project     Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  featureArea FeatureArea?     @relation(fields: [featureAreaId], references: [id], onDelete: SetNull)
+  testLinks   DefectTestLink[]
+
+  @@unique([projectId, externalId, source])
+  @@index([projectId, status])
+  @@index([projectId, severity])
+  @@index([projectId, createdAt])
+  @@map("defects")
+}
+
+model DefectTestLink {
+  defectId   String @map("defect_id") @db.Uuid
+  testCaseId String @map("test_case_id") @db.Uuid
+
+  defect   Defect   @relation(fields: [defectId], references: [id], onDelete: Cascade)
+  testCase TestCase @relation(fields: [testCaseId], references: [id], onDelete: Cascade)
+
+  @@id([defectId, testCaseId])
+  @@map("defect_test_links")
+}
+
+// ─── Epic ────────────────────────────────────────────────────
+
+model Epic {
+  id         String   @id @default(uuid()) @db.Uuid
+  projectId  String   @map("project_id") @db.Uuid
+  externalId String?  @map("external_id")
+  title      String
+  url        String?
+  status     String   @default("OPEN")
+  source     String   @default("jira")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  stories Story[]
+
+  @@unique([projectId, externalId, source])
+  @@index([projectId])
+  @@map("epics")
+}
+
+// ─── Story (Jira Stories) ────────────────────────────────────
+
+enum StoryStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+  REOPENED
+}
+
+model Story {
+  id           String      @id @default(uuid()) @db.Uuid
+  projectId    String      @map("project_id") @db.Uuid
+  externalId   String?     @map("external_id")
+  title        String
+  url          String?
+  status       StoryStatus @default(OPEN)
+  storyPoints  Int?        @map("story_points")
+  assignee     String?
+  component    String?
+  labels       String[]    @default([])
+  epicId       String?     @map("epic_id") @db.Uuid
+  source       String      @default("jira")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  resolvedAt   DateTime?   @map("resolved_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  epic    Epic?   @relation(fields: [epicId], references: [id], onDelete: SetNull)
+
+  @@unique([projectId, externalId, source])
+  @@index([projectId, status])
+  @@index([projectId, createdAt])
+  @@index([epicId])
+  @@map("stories")
+}
+
+// ─── Pipeline Run ────────────────────────────────────────────
+
+enum PipelineStatus {
+  QUEUED
+  IN_PROGRESS
+  SUCCESS
+  FAILURE
+  CANCELLED
+}
+
+model PipelineRun {
+  id           String         @id @default(uuid()) @db.Uuid
+  projectId    String         @map("project_id") @db.Uuid
+  externalId   String?        @map("external_id")
+  workflowName String         @map("workflow_name")
+  branch       String?
+  sha          String?
+  status       PipelineStatus @default(QUEUED)
+  durationMs   Int?           @map("duration_ms")
+  triggeredBy  String?        @map("triggered_by")
+  startedAt    DateTime       @default(now()) @map("started_at")
+  finishedAt   DateTime?      @map("finished_at")
+  jobs         Json           @default("[]") // per-job breakdown
+  url          String?
+  source       String         @default("github") // github, gitlab, jenkins
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  project  Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  testRuns TestRun[]
+
+  @@unique([projectId, externalId, source])
+  @@index([projectId, startedAt])
+  @@map("pipeline_runs")
+}
+
+// ─── KPI Snapshot (time-series — will use TimescaleDB hypertable) ───
+
+enum KPIMetric {
+  COVERAGE_PCT
+  PASS_RATE_7D
+  PASS_RATE_30D
+  FLAKY_RATE
+  MTTD_HOURS
+  MTTR_HOURS
+  ESCAPE_RATE
+  EXEC_VELOCITY
+  REQ_COVERAGE
+  READINESS_SCORE
+}
+
+model KPISnapshot {
+  id         String    @id @default(uuid()) @db.Uuid
+  projectId  String    @map("project_id") @db.Uuid
+  metric     KPIMetric
+  value      Float
+  target     Float?
+  recordedAt DateTime  @default(now()) @map("recorded_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, metric, recordedAt])
+  @@map("kpi_snapshots")
+}
+
+// ─── KPI Target ──────────────────────────────────────────────
+
+model KPITarget {
+  id              String    @id @default(uuid()) @db.Uuid
+  projectId       String    @map("project_id") @db.Uuid
+  metric          KPIMetric
+  target          Float
+  greenThreshold  Float     @map("green_threshold")
+  amberThreshold  Float     @map("amber_threshold")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, metric])
+  @@map("kpi_targets")
+}
+
+// ─── Alert Rule ──────────────────────────────────────────────
+
+enum AlertCondition {
+  LESS_THAN
+  GREATER_THAN
+  DELTA_PCT
+}
+
+enum AlertChannel {
+  SLACK
+  EMAIL
+  IN_APP
+}
+
+model AlertRule {
+  id            String         @id @default(uuid()) @db.Uuid
+  projectId     String         @map("project_id") @db.Uuid
+  metric        KPIMetric
+  condition     AlertCondition
+  threshold     Float
+  channel       AlertChannel
+  channelConfig Json           @default("{}") @map("channel_config")
+  enabled       Boolean        @default(true)
+  lastTriggered DateTime?      @map("last_triggered")
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("alert_rules")
+}
+
+// ─── Dashboard Layout ────────────────────────────────────────
+
+model DashboardLayout {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  projectId String?  @map("project_id") @db.Uuid // null = org-level
+  widgets   Json     @default("[]") // [{type, x, y, w, h, config}]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, projectId])
+  @@map("dashboard_layouts")
+}
+
+// ─── Notification ────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  title     String
+  body      String
+  link      String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read, createdAt])
+  @@map("notifications")
+}
+
+// ─── Audit Log ───────────────────────────────────────────────
+
+model AuditLog {
+  id            String   @id @default(uuid()) @db.Uuid
+  projectId     String?  @map("project_id") @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  action        String   // e.g. "connector.created", "kpi_target.updated"
+  entityType    String?  @map("entity_type")
+  entityId      String?  @map("entity_id")
+  previousValue Json?    @map("previous_value")
+  newValue      Json?    @map("new_value")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+  @@map("audit_logs")
+}

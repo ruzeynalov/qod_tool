@@ -1,0 +1,8 @@
+# Dev overrides — expose DB and Redis ports to host
+services:
+  postgres:
+    ports:
+      - '5432:5432'
+  redis:
+    ports:
+      - '6379:6379'

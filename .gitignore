@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.next/
+.env
+.env.local
+*.log
+.turbo/
+/coverage/
+**/coverage/
+!**/app/**/coverage/
+.prisma/
+*.tsbuildinfo
+
+# D3: Ensure API .env is never committed (may contain secrets)
+packages/api/.env

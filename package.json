@@ -1,0 +1,33 @@
+{
+  "name": "qod",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "npm@11.1.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "test:e2e": "turbo run test:e2e",
+    "db:migrate": "npm run -w packages/api db:migrate",
+    "db:seed": "npm run -w packages/api db:seed",
+    "db:seed:demo": "npm run -w packages/api db:seed:demo",
+    "docker:up": "docker compose -f deploy/docker-compose/docker-compose.yml up --build -d",
+    "docker:down": "docker compose -f deploy/docker-compose/docker-compose.yml down",
+    "docker:down:volumes": "docker compose -f deploy/docker-compose/docker-compose.yml down -v",
+    "docker:logs": "docker compose -f deploy/docker-compose/docker-compose.yml logs -f",
+    "docker:up:infra": "docker compose -f deploy/docker-compose/docker-compose.yml up postgres redis -d",
+    "docker:seed": "DATABASE_URL=postgresql://qod:qod_dev_password@localhost:5432/qod npm run -w packages/api db:seed",
+    "docker:ps": "docker compose -f deploy/docker-compose/docker-compose.yml ps"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
+    "eslint": "^9.39.4",
+    "turbo": "^2.3.0",
+    "typescript": "^5.5.0"
+  }
+}
