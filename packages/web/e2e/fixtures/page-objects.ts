@@ -1,18 +1,18 @@
-import { type Page, type Locator, expect } from '@playwright/test';
+import { type Page, type Locator } from '@playwright/test';
 
 // ─── Sidebar ─────────────────────────────────────────────────────────
 
 export class Sidebar {
-  readonly root: Locator;
+  readonly nav: Locator;
   readonly overviewLink: Locator;
   readonly projectsLink: Locator;
   readonly collapseButton: Locator;
 
   constructor(private page: Page) {
-    this.root = page.locator('nav').first();
-    this.overviewLink = page.getByRole('link', { name: /overview/i }).first();
-    this.projectsLink = page.getByRole('link', { name: /projects/i }).first();
-    this.collapseButton = page.locator('button:has(svg.lucide-chevron-left), button:has(svg.lucide-chevron-right)').first();
+    this.nav = page.locator('nav[aria-label="Main navigation"]');
+    this.overviewLink = this.nav.getByRole('link', { name: 'Overview' }).first();
+    this.projectsLink = this.nav.getByRole('link', { name: 'Projects' });
+    this.collapseButton = page.getByRole('button', { name: /collapse|expand/i });
   }
 
   async navigateTo(name: 'Overview' | 'Projects') {
@@ -26,12 +26,12 @@ export class Sidebar {
 export class Header {
   readonly demoToggle: Locator;
   readonly themeToggle: Locator;
-  readonly userMenu: Locator;
+  readonly userButton: Locator;
 
   constructor(private page: Page) {
-    this.demoToggle = page.getByRole('button', { name: /demo/i });
-    this.themeToggle = page.locator('button:has(svg.lucide-sun), button:has(svg.lucide-moon)');
-    this.userMenu = page.locator('button:has(svg.lucide-user)');
+    this.demoToggle = page.locator('button').filter({ hasText: 'Demo' });
+    this.themeToggle = page.getByTitle(/switch to (light|dark) mode/i);
+    this.userButton = page.locator('header button').last();
   }
 
   async toggleDemo() {
@@ -56,12 +56,14 @@ export class LoginPage {
     this.emailInput = page.locator('#email');
     this.passwordInput = page.locator('#password');
     this.submitButton = page.getByRole('button', { name: /sign in/i });
-    this.errorAlert = page.getByRole('alert');
+    // Next.js has a hidden route-announcer with role="alert"; target app error alerts by class
+    this.errorAlert = page.locator('div[role="alert"].rounded-md');
     this.heading = page.getByRole('heading', { name: /sign in to qod/i });
   }
 
   async goto() {
     await this.page.goto('/login');
+    await this.heading.waitFor({ timeout: 15_000 });
   }
 
   async login(email: string, password: string) {
@@ -75,18 +77,14 @@ export class LoginPage {
 
 export class DashboardPage {
   readonly heading: Locator;
-  readonly summaryCards: Locator;
-  readonly projectLinks: Locator;
 
   constructor(private page: Page) {
     this.heading = page.getByText('Quality Observability Dashboard');
-    this.summaryCards = page.locator('.grid > div').first();
-    this.projectLinks = page.getByRole('link').filter({ hasText: /platform|banking|tools/i });
   }
 
   async goto() {
     await this.page.goto('/');
-    await this.heading.waitFor();
+    await this.heading.waitFor({ timeout: 15_000 });
   }
 }
 
@@ -95,17 +93,15 @@ export class DashboardPage {
 export class ProjectsPage {
   readonly heading: Locator;
   readonly newProjectButton: Locator;
-  readonly projectCards: Locator;
 
   constructor(private page: Page) {
-    this.heading = page.getByRole('heading', { name: /projects/i });
+    this.heading = page.getByRole('heading', { name: 'Projects' });
     this.newProjectButton = page.getByRole('button', { name: /new project/i });
-    this.projectCards = page.getByRole('link').filter({ hasText: /platform|banking|tools/i });
   }
 
   async goto() {
     await this.page.goto('/projects');
-    await this.heading.waitFor();
+    await this.heading.waitFor({ timeout: 15_000 });
   }
 
   async openProject(name: string | RegExp) {
@@ -116,35 +112,25 @@ export class ProjectsPage {
 // ─── Project Detail Page ─────────────────────────────────────────────
 
 export class ProjectDetailPage {
-  readonly tabs: {
-    overview: Locator;
-    coverage: Locator;
-    runs: Locator;
-    defects: Locator;
-    kpis: Locator;
-    settings: Locator;
-  };
+  constructor(private page: Page, private projectId: string) {}
 
-  constructor(private page: Page, private projectId: string) {
-    const base = `/projects/${projectId}`;
-    this.tabs = {
-      overview: page.getByRole('link', { name: /overview/i }).filter({ has: page.locator(`[href="${base}"], [href="${base}/"]`) }).or(page.getByRole('link', { name: /^overview$/i })),
-      coverage: page.getByRole('link', { name: /coverage/i }),
-      runs: page.getByRole('link', { name: /runs/i }),
-      defects: page.getByRole('link', { name: /defects/i }),
-      kpis: page.getByRole('link', { name: /kpis/i }),
-      settings: page.getByRole('link', { name: /settings/i }),
-    };
+  private get basePath() {
+    return `/projects/${this.projectId}`;
   }
 
+  /** Navigate directly to a project tab by URL. */
   async goto(tab?: 'coverage' | 'runs' | 'defects' | 'kpis' | 'settings') {
-    const path = tab
-      ? `/projects/${this.projectId}/${tab}`
-      : `/projects/${this.projectId}`;
+    const path = tab ? `${this.basePath}/${tab}` : this.basePath;
     await this.page.goto(path);
+    // Wait for the project header to render
+    await this.page.locator('h1').first().waitFor({ timeout: 15_000 });
   }
 
-  async navigateToTab(tab: keyof typeof this.tabs) {
-    await this.tabs[tab].click();
+  /** Click a tab in the project tab bar (inside main content, not sidebar). */
+  async clickTab(label: 'Overview' | 'Coverage' | 'Runs' | 'Defects' | 'KPIs' | 'Settings') {
+    // Scope to main content area to avoid matching identical sidebar links
+    const main = this.page.getByRole('main');
+    const tabLink = main.getByRole('link', { name: label });
+    await tabLink.click();
   }
 }

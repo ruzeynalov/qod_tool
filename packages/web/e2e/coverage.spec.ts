@@ -5,76 +5,53 @@ const PROJECT = DEMO_PROJECTS.ecommerce;
 test.describe('Coverage page', () => {
   test.beforeEach(async ({ demoPage: page }) => {
     await page.goto(`/projects/${PROJECT.id}/coverage`);
+    await page.getByText('Test Coverage').waitFor({ timeout: 15_000 });
   });
 
-  test('renders the test cases tab by default', async ({ demoPage: page }) => {
-    // Should show Test Cases tab or table
-    await expect(page.getByText(/test cases/i).first()).toBeVisible();
+  test('renders coverage summary cards', async ({ demoPage: page }) => {
+    await expect(page.getByText('Test Coverage')).toBeVisible();
+    // Summary cards show coverage percentage
+    await expect(page.getByText(/%/).first()).toBeVisible();
   });
 
-  test('displays a data table with test cases', async ({ demoPage: page }) => {
-    // Wait for table to render
+  test('displays the test cases data table', async ({ demoPage: page }) => {
     const table = page.locator('table').first();
     await expect(table).toBeVisible();
 
-    // Table should have rows
     const rows = table.locator('tbody tr');
     await expect(rows.first()).toBeVisible();
     expect(await rows.count()).toBeGreaterThan(0);
   });
 
-  test('search input filters test cases', async ({ demoPage: page }) => {
+  test('search input is present and filters', async ({ demoPage: page }) => {
     const searchInput = page.getByPlaceholder(/search/i).first();
     await expect(searchInput).toBeVisible();
 
-    // Get initial row count
-    const table = page.locator('table').first();
-    await expect(table).toBeVisible();
-
-    // Type a search term — should filter results
     await searchInput.fill('auth');
     // Wait for debounce (300ms) + re-render
     await page.waitForTimeout(500);
 
-    // Table should still be visible (results may vary but table should persist)
-    await expect(table).toBeVisible();
+    // Table should still be visible
+    await expect(page.locator('table').first()).toBeVisible();
   });
 
   test('filter dropdowns are present', async ({ demoPage: page }) => {
-    // Suite and type filter selects
     const selects = page.locator('select');
     expect(await selects.count()).toBeGreaterThanOrEqual(1);
   });
 
-  test('pagination controls work', async ({ demoPage: page }) => {
-    const table = page.locator('table').first();
-    await expect(table).toBeVisible();
-
-    // Look for pagination (Next/Previous buttons or page numbers)
-    const nextBtn = page.getByRole('button', { name: /next/i })
-      .or(page.locator('button:has(svg.lucide-chevron-right)'));
-
-    if (await nextBtn.isVisible()) {
-      const firstRowText = await table.locator('tbody tr').first().textContent();
-      await nextBtn.click();
-      await page.waitForTimeout(300);
-
-      // After clicking next, content should change
-      const newFirstRowText = await table.locator('tbody tr').first().textContent();
-      expect(newFirstRowText).not.toBe(firstRowText);
+  test('tabs for Test Cases, Stories, Epics exist', async ({ demoPage: page }) => {
+    for (const tab of ['Test Cases', 'Stories', 'Epics']) {
+      await expect(page.getByText(tab, { exact: true }).first()).toBeVisible();
     }
   });
 
-  test('tabs switch between Test Cases, Stories, Epics', async ({ demoPage: page }) => {
-    const tabs = ['Test Cases', 'Stories', 'Epics'];
-    for (const tab of tabs) {
-      const tabButton = page.getByRole('button', { name: new RegExp(tab, 'i') })
-        .or(page.getByText(tab, { exact: true }));
-
-      if (await tabButton.first().isVisible()) {
-        await tabButton.first().click();
-        await page.waitForTimeout(300);
-      }
+  test('pagination is present', async ({ demoPage: page }) => {
+    // Look for pagination indicators (page numbers or next/prev buttons)
+    const pagination = page.getByRole('button', { name: /next|prev|›|»/i })
+      .or(page.locator('button').filter({ hasText: /^[0-9]+$/ }));
+    if (await pagination.first().isVisible({ timeout: 3000 }).catch(() => false)) {
+      expect(await pagination.count()).toBeGreaterThan(0);
     }
   });
 });

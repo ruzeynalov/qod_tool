@@ -29,15 +29,19 @@ test.describe('Login page', () => {
     await expect(page.getByText('admin@qod.dev / admin123')).toBeVisible();
   });
 
-  test('submit button is disabled while loading', async ({ page }) => {
-    // Intercept the auth endpoint to delay response
+  test('submit button shows loading state', async ({ page }) => {
+    // Delay server response so we can observe the loading state
     await page.route('**/api/v1/auth/login', async (route) => {
-      await new Promise((r) => setTimeout(r, 2000));
-      await route.fulfill({ status: 200, json: { accessToken: 'tok', user: {} } });
+      await new Promise((r) => setTimeout(r, 5000));
+      await route.fulfill({ status: 200, json: { accessToken: 'tok', user: { id: '1', email: 'a', name: 'A', role: 'admin', orgId: 'o' } } });
     });
 
-    await loginPage.login('admin@qod.dev', 'admin123');
-    await expect(loginPage.submitButton).toContainText('Signing in');
+    await loginPage.emailInput.fill('admin@qod.dev');
+    await loginPage.passwordInput.fill('admin123');
+    // Click and immediately check for loading text
+    const submitBtn = page.locator('button[type="submit"]');
+    await submitBtn.click();
+    await expect(submitBtn).toContainText('Signing in', { timeout: 3000 });
   });
 
   test('shows error on invalid credentials', async ({ page }) => {
@@ -76,7 +80,7 @@ test.describe('Login page', () => {
     await expect(page).toHaveURL(/\/projects/);
   });
 
-  test('form requires email and password (HTML validation)', async ({ page }) => {
+  test('form validates required fields', async () => {
     await expect(loginPage.emailInput).toHaveAttribute('required', '');
     await expect(loginPage.passwordInput).toHaveAttribute('required', '');
   });
@@ -84,7 +88,6 @@ test.describe('Login page', () => {
 
 test.describe('Auth gate', () => {
   test('redirects unauthenticated users to /login', async ({ page }) => {
-    // Ensure demo mode is off and no auth token
     await page.addInitScript(() => {
       localStorage.removeItem('qod-demo-mode');
       localStorage.removeItem('qod-auth-token');

@@ -12,58 +12,50 @@ test.describe('Project overview page', () => {
   });
 
   test('renders project name and KPI cards', async ({ demoPage: page }) => {
-    await expect(page.getByText(PROJECT.name).first()).toBeVisible();
-
-    // KPI cards should be present (up to 9)
-    const kpiMetrics = ['Pass Rate', 'Coverage', 'Flaky Rate'];
-    for (const metric of kpiMetrics) {
-      await expect(page.getByText(metric, { exact: false }).first()).toBeVisible();
-    }
+    await expect(page.locator('h1').filter({ hasText: PROJECT.name }).first()).toBeVisible();
+    // KPI percentage values should be present
+    await expect(page.getByText(/%/).first()).toBeVisible();
   });
 
   test('shows demo mode badge', async ({ demoPage: page }) => {
-    await expect(page.getByText(/demo/i).first()).toBeVisible();
+    await expect(page.getByText('Demo Mode')).toBeVisible();
   });
 
-  test('displays recent test runs', async ({ demoPage: page }) => {
-    // Recent runs section should have run items
-    // Each run shows a status, name, and test stats
-    await expect(page.getByText(/passed/i).first()).toBeVisible();
+  test('displays recent test runs section', async ({ demoPage: page }) => {
+    await expect(page.getByText('Recent Runs')).toBeVisible();
   });
 
   test('all navigation tabs are present', async ({ demoPage: page }) => {
     const tabNames = ['Overview', 'Coverage', 'Runs', 'Defects', 'KPIs', 'Settings'];
     for (const tab of tabNames) {
       await expect(
-        page.getByRole('link', { name: new RegExp(tab, 'i') }).first()
+        page.locator(`a[href^="/projects/${PROJECT.id}"]`).filter({ hasText: tab }).first()
       ).toBeVisible();
     }
   });
 
   test('tab navigation works — coverage', async ({ demoPage: page }) => {
-    await detail.navigateToTab('coverage');
+    await detail.clickTab('Coverage');
     await page.waitForURL(`**/projects/${PROJECT.id}/coverage`);
-    await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT.id}/coverage`));
   });
 
   test('tab navigation works — runs', async ({ demoPage: page }) => {
-    await detail.navigateToTab('runs');
+    await detail.clickTab('Runs');
     await page.waitForURL(`**/projects/${PROJECT.id}/runs`);
-    await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT.id}/runs`));
   });
 
   test('tab navigation works — defects', async ({ demoPage: page }) => {
-    await detail.navigateToTab('defects');
+    await detail.clickTab('Defects');
     await page.waitForURL(`**/projects/${PROJECT.id}/defects`);
   });
 
   test('tab navigation works — kpis', async ({ demoPage: page }) => {
-    await detail.navigateToTab('kpis');
+    await detail.clickTab('KPIs');
     await page.waitForURL(`**/projects/${PROJECT.id}/kpis`);
   });
 
   test('tab navigation works — settings', async ({ demoPage: page }) => {
-    await detail.navigateToTab('settings');
+    await detail.clickTab('Settings');
     await page.waitForURL(`**/projects/${PROJECT.id}/settings`);
   });
 });

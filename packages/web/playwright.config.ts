@@ -13,7 +13,7 @@ export default defineConfig({
   expect: { timeout: 10_000 },
 
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL: `http://localhost:${process.env.QOD_TEST_PORT ?? '3002'}`,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'on-first-retry',
@@ -35,8 +35,8 @@ export default defineConfig({
   ],
 
   webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:3000',
+    command: `npx next dev --port ${process.env.QOD_TEST_PORT ?? '3002'}`,
+    url: `http://localhost:${process.env.QOD_TEST_PORT ?? '3002'}`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

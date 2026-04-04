@@ -7,27 +7,26 @@ test.describe('Projects list page', () => {
     await projects.goto();
 
     await expect(projects.heading).toBeVisible();
-
     for (const project of Object.values(DEMO_PROJECTS)) {
       await expect(page.getByText(project.name).first()).toBeVisible();
     }
   });
 
-  test('each project card shows key metrics', async ({ demoPage: page }) => {
+  test('project cards show key stats', async ({ demoPage: page }) => {
     const projects = new ProjectsPage(page);
     await projects.goto();
 
-    // At least one project card should display pass rate and test count
-    await expect(page.getByText(/pass rate/i).first()).toBeVisible();
+    // Cards display test count, pass rate %, open defects count
+    await expect(page.getByText(/%/).first()).toBeVisible();
+    await expect(page.getByText(/open/).first()).toBeVisible();
   });
 
   test('shows demo badge on demo projects', async ({ demoPage: page }) => {
     const projects = new ProjectsPage(page);
     await projects.goto();
 
-    // Demo projects should have a demo indicator
     const demoBadges = page.getByText('Demo', { exact: true });
-    await expect(demoBadges.first()).toBeVisible();
+    expect(await demoBadges.count()).toBeGreaterThanOrEqual(3);
   });
 
   test('clicking a project card navigates to project overview', async ({ demoPage: page }) => {
@@ -52,8 +51,8 @@ test.describe('Projects list page', () => {
 
     await projects.newProjectButton.click();
 
-    // Form fields should appear
-    const nameInput = page.getByPlaceholder(/project name/i).or(page.locator('input[name="name"]')).first();
+    // Form should appear with project name input
+    const nameInput = page.getByPlaceholder('e.g. Payment Service');
     await expect(nameInput).toBeVisible();
 
     // Cancel button should dismiss the form

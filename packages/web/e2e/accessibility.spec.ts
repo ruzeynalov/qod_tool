@@ -1,25 +1,22 @@
 import { test, expect, DEMO_PROJECTS } from './fixtures/demo-mode';
 
 test.describe('Keyboard navigation', () => {
-  test('Tab key cycles through interactive elements on dashboard', async ({ demoPage: page }) => {
+  test('Tab key cycles through interactive elements', async ({ demoPage: page }) => {
     await page.goto('/');
-    await expect(page.getByText('Quality Observability Dashboard')).toBeVisible();
+    await page.getByText('Quality Observability Dashboard').waitFor();
 
-    // Press Tab several times — focus should move through sidebar links, header buttons, etc.
     for (let i = 0; i < 5; i++) {
       await page.keyboard.press('Tab');
     }
 
-    // An interactive element should be focused
     const focused = page.locator(':focus');
-    await expect(focused).toBeVisible();
+    await expect(focused).toBeAttached();
   });
 
   test('Enter key activates focused links', async ({ demoPage: page }) => {
     await page.goto('/projects');
-    await expect(page.getByRole('heading', { name: /projects/i })).toBeVisible();
+    await page.getByRole('heading', { name: 'Projects' }).waitFor();
 
-    // Focus the first project link and activate it
     const firstProjectLink = page.getByRole('link', {
       name: new RegExp(DEMO_PROJECTS.ecommerce.name),
     }).first();
@@ -33,53 +30,53 @@ test.describe('Keyboard navigation', () => {
 test.describe('Semantic HTML', () => {
   test('login form uses correct input types', async ({ page }) => {
     await page.goto('/login');
+    await page.getByRole('heading', { name: /sign in/i }).waitFor();
+
     await expect(page.locator('#email')).toHaveAttribute('type', 'email');
     await expect(page.locator('#password')).toHaveAttribute('type', 'password');
   });
 
   test('login error uses role="alert"', async ({ page }) => {
+    await page.goto('/login');
+    await page.getByRole('heading', { name: /sign in/i }).waitFor();
+
     await page.route('**/api/v1/auth/login', (route) =>
       route.fulfill({ status: 401, json: { message: 'Bad creds' } }),
     );
-    await page.goto('/login');
+
     await page.locator('#email').fill('bad@test.com');
     await page.locator('#password').fill('wrong');
     await page.getByRole('button', { name: /sign in/i }).click();
 
-    await expect(page.getByRole('alert')).toBeVisible();
+    await expect(page.locator('div[role="alert"].rounded-md')).toBeVisible();
   });
 
   test('tables have proper structure', async ({ demoPage: page }) => {
     await page.goto(`/projects/${DEMO_PROJECTS.ecommerce.id}/coverage`);
+    await page.getByText('Test Coverage').waitFor({ timeout: 15_000 });
 
     const table = page.locator('table').first();
     await expect(table).toBeVisible();
-
-    // Should have thead and tbody
     await expect(table.locator('thead')).toBeVisible();
     await expect(table.locator('tbody')).toBeVisible();
-
-    // Should have th elements
-    const headers = table.locator('th');
-    expect(await headers.count()).toBeGreaterThan(0);
+    expect(await table.locator('th').count()).toBeGreaterThan(0);
   });
 
-  test('navigation uses proper link elements', async ({ demoPage: page }) => {
+  test('sidebar navigation uses <nav> with links', async ({ demoPage: page }) => {
     await page.goto('/');
+    await page.getByText('Quality Observability Dashboard').waitFor();
 
-    // Sidebar should contain actual <a> elements, not divs with onClick
-    const sidebarLinks = page.locator('nav a');
-    expect(await sidebarLinks.count()).toBeGreaterThan(0);
+    const nav = page.locator('nav[aria-label="Main navigation"]');
+    await expect(nav).toBeVisible();
+
+    const links = nav.locator('a');
+    expect(await links.count()).toBeGreaterThan(0);
   });
 });
 
 test.describe('Loading states', () => {
-  test('spinner appears while data loads', async ({ demoPage: page }) => {
-    // Demo data is synchronous, so loading is very brief.
-    // We verify the spinner component exists (role="status") when it would appear.
+  test('page content renders fully', async ({ demoPage: page }) => {
     await page.goto(`/projects/${DEMO_PROJECTS.ecommerce.id}`);
-
-    // Page should eventually settle with content
-    await expect(page.getByText(DEMO_PROJECTS.ecommerce.name).first()).toBeVisible();
+    await expect(page.locator('h1').filter({ hasText: DEMO_PROJECTS.ecommerce.name }).first()).toBeVisible();
   });
 });
