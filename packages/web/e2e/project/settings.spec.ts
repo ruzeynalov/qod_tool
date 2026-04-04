@@ -1,4 +1,4 @@
-import { test, expect, DEMO_PROJECTS } from './fixtures/demo-mode';
+import { test, expect, DEMO_PROJECTS } from '../fixtures/demo-mode';
 
 const PROJECT = DEMO_PROJECTS.ecommerce;
 
