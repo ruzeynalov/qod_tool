@@ -1,5 +1,5 @@
-import { test, expect, DEMO_PROJECTS } from './fixtures/demo-mode';
-import { ProjectsPage } from './fixtures/page-objects';
+import { test, expect, DEMO_PROJECTS } from '../fixtures/demo-mode';
+import { ProjectsPage } from '../fixtures/page-objects';
 
 test.describe('Projects list page', () => {
   test('renders heading and all demo projects', async ({ demoPage: page }) => {

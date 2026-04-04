@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { LoginPage } from './fixtures/page-objects';
+import { LoginPage } from '../fixtures/page-objects';
 
 test.describe('Login page', () => {
   let loginPage: LoginPage;

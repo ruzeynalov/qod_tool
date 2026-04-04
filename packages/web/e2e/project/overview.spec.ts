@@ -1,5 +1,5 @@
-import { test, expect, DEMO_PROJECTS } from './fixtures/demo-mode';
-import { ProjectDetailPage } from './fixtures/page-objects';
+import { test, expect, DEMO_PROJECTS } from '../fixtures/demo-mode';
+import { ProjectDetailPage } from '../fixtures/page-objects';
 
 const PROJECT = DEMO_PROJECTS.ecommerce;
 

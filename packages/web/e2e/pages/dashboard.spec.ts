@@ -1,5 +1,5 @@
-import { test, expect, DEMO_PROJECTS } from './fixtures/demo-mode';
-import { DashboardPage, Header, Sidebar } from './fixtures/page-objects';
+import { test, expect, DEMO_PROJECTS } from '../fixtures/demo-mode';
+import { DashboardPage, Header, Sidebar } from '../fixtures/page-objects';
 
 test.describe('Dashboard overview', () => {
   test('renders the main heading and summary cards', async ({ demoPage: page }) => {
