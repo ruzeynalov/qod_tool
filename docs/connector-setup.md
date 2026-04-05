@@ -20,26 +20,6 @@ QOD uses connectors to ingest data from external tools. Connectors are configure
 | Issue Type | Issue type to fetch | `Bug` |
 | Escaped Label | Label for escaped defects (optional) | `escaped-to-prod` |
 
-### JSON export example
-
-```json
-{
-  "connectorType": "JIRA",
-  "name": "My Project Defects",
-  "credentials": {
-    "url": "https://acme-corp.atlassian.net/",
-    "username": "qa-lead@acme-corp.com",
-    "token": "ATATT3xFfGF0_placeholder_replace_with_real_token",
-    "projectKey": "PROJ",
-    "escapedLabel": "escaped-to-prod",
-    "issueType": "Bug"
-  },
-  "fieldMapping": {},
-  "syncSchedule": "0 0 * * *",
-  "syncTimezone": "UTC"
-}
-```
-
 ## Jira — Stories & Epics
 
 Uses the same authentication as Jira Defects (Atlassian API token). Additional fields:
@@ -49,27 +29,6 @@ Uses the same authentication as Jira Defects (Atlassian API token). Additional f
 | Story Issue Type | Issue type for stories | `Story` |
 | Epic Issue Type | Issue type for epics | `Epic` |
 | Story Points Field | Custom field ID for story points | `customfield_10016` |
-
-### JSON export example
-
-```json
-{
-  "connectorType": "JIRA_STORIES",
-  "name": "My Project Stories",
-  "credentials": {
-    "url": "https://acme-corp.atlassian.net/",
-    "username": "qa-lead@acme-corp.com",
-    "token": "ATATT3xFfGF0_placeholder_replace_with_real_token",
-    "projectKey": "PROJ",
-    "storyIssueType": "Story",
-    "epicIssueType": "Epic",
-    "storyPointsField": "customfield_10016"
-  },
-  "fieldMapping": {},
-  "syncSchedule": "0 0 * * *",
-  "syncTimezone": "UTC"
-}
-```
 
 > **Tip**: To find the story points custom field ID, go to **Administration → Issues → Custom fields** in Jira and look for the "Story Points" field. Alternatively, use the Jira REST API: `GET /rest/api/3/field` and search for a field with `name` containing "Story Points" — the `id` value (e.g. `customfield_10016`) is what you need.
 
@@ -91,25 +50,6 @@ Uses the same authentication as Jira Defects (Atlassian API token). Additional f
 | Branch | Branch to track | `main` |
 | Max Runs | Number of recent runs to fetch | `20` |
 
-### JSON export example
-
-```json
-{
-  "connectorType": "GITHUB",
-  "name": "Backend API CI",
-  "credentials": {
-    "url": "github.com/acme-corp/backend-api/",
-    "token": "github_pat_11ABC123_placeholder_token_value",
-    "workflowFile": "ci.yml",
-    "branch": "main",
-    "maxRuns": 20
-  },
-  "fieldMapping": {},
-  "syncSchedule": "0 0 * * *",
-  "syncTimezone": "UTC"
-}
-```
-
 ## TestRail
 
 ### How to get an API key
@@ -125,24 +65,6 @@ Uses the same authentication as Jira Defects (Atlassian API token). Additional f
 | Username | TestRail login email | `qa-lead@acme-corp.com` |
 | API Key | API key from step above | `aB1cD2eF3gH4iJ5kL6mN7oP8qR9sT0u` |
 | Project ID | TestRail project ID | `1` |
-
-### JSON export example
-
-```json
-{
-  "connectorType": "TESTRAIL",
-  "name": "My TestRail Project",
-  "credentials": {
-    "url": "https://acme-corp.testrail.io/",
-    "username": "qa-lead@acme-corp.com",
-    "apiKey": "aB1cD2eF3gH4iJ5kL6mN7oP8qR9sT0u",
-    "projectId": "1"
-  },
-  "fieldMapping": {},
-  "syncSchedule": "0 0 * * *",
-  "syncTimezone": "UTC"
-}
-```
 
 ## Sync Schedule
 
