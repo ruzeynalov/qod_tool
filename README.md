@@ -28,6 +28,20 @@ cd deploy/docker-compose
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d
 ```
 
+## Connector Setup
+
+After launching QOD, configure connectors to start ingesting data from your tools. Go to **Settings → Connectors** in any project.
+
+| Connector | Auth Required | Setup Time |
+|-----------|--------------|------------|
+| Jira (Defects & Stories) | API Token | ~5 min |
+| GitHub Actions | PAT or GitHub App | ~5 min |
+| TestRail | API Key | ~3 min |
+
+> **Quick example** — Jira: grab an [API token](https://id.atlassian.com/manage-profile/security/api-tokens), enter your Atlassian base URL and email, set the JQL filter, and hit **Test Connection**.
+
+For step-by-step instructions, see the [Connector Setup Guide](docs/connector-setup.md).
+
 ## Features
 
 ### Dashboard Modules
@@ -217,6 +231,7 @@ TestNG XML ──────┘   ├─ Aggregation Engine          ├─ Def
 
 See the [`docs/`](docs/) folder for additional documentation:
 
+- [Connector Setup Guide](docs/connector-setup.md)
 - [API Reference](docs/api.md)
 - [Configuration](docs/configuration.md)
 - [Deployment](docs/deployment.md)
