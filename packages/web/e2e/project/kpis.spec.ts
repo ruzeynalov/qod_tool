@@ -14,9 +14,9 @@ test.describe('KPIs page', () => {
   });
 
   test('displays RAG status colors', async ({ demoPage: page }) => {
-    // KPI cards have colored left borders for RAG status
-    const cards = page.locator('[class*="border-l"]');
-    expect(await cards.count()).toBeGreaterThan(0);
+    // User-visible RAG label in the detail header (avoids [class*="border-l"], which can match
+    // nothing in WebKit when class strings include arbitrary values like border-l-[3px]).
+    await expect(page.getByText(/^(GREEN|AMBER|RED)$/).first()).toBeVisible();
   });
 
   test('trend charts are rendered', async ({ demoPage: page }) => {

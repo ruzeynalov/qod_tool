@@ -13,9 +13,12 @@ test.describe('Runs smoke', () => {
 
   test('Charts & Trends tab shows Pass Rate Trend and Execution Timeline charts', async ({ demoPage: page }) => {
     await expect(page.getByRole('heading', { name: 'Pass Rate Trend' })).toBeVisible();
-    // Charts render as Recharts SVGs (may be 1 or more depending on viewport)
-    const charts = page.locator('.recharts-wrapper');
-    expect(await charts.count()).toBeGreaterThanOrEqual(1);
+    await expect(page.getByRole('heading', { name: 'Execution Timeline' })).toBeVisible();
+    // PassRateTrend / ExecutionTimeline are dynamic imports; Recharts mounts after data + chunk load.
+    // Poll count so we do not assert immediately after headings (still a spinner) or on a single frame.
+    const surfaces = page.locator('svg.recharts-surface');
+    await expect.poll(async () => surfaces.count(), { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
+    await expect(surfaces.first()).toBeVisible();
   });
 
   test('period buttons update chart data', async ({ demoPage: page }) => {
@@ -25,7 +28,7 @@ test.describe('Runs smoke', () => {
     await page.getByRole('button', { name: '7d', exact: true }).first().click();
     await page.waitForTimeout(500);
     // Charts should still be rendered
-    expect(await page.locator('.recharts-wrapper').count()).toBeGreaterThanOrEqual(2);
+    await expect.poll(async () => page.locator('svg.recharts-surface').count(), { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
   });
 
   test('Re-run Analysis or Run Health section shows stat cards', async ({ demoPage: page }) => {
