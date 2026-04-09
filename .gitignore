@@ -13,3 +13,5 @@ dist/
 
 # D3: Ensure API .env is never committed (may contain secrets)
 packages/api/.env
+packages/web/playwright-report/*
+packages/web/test-results/*

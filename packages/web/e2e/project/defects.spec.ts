@@ -5,8 +5,9 @@ const PROJECT = DEMO_PROJECTS.ecommerce;
 test.describe('Defects page', () => {
   test.beforeEach(async ({ demoPage: page }) => {
     await page.goto(`/projects/${PROJECT.id}/defects`);
-    // Wait for defects content to load
-    await page.getByText(/defect/i).first().waitFor({ timeout: 15_000 });
+    // The project tab label "Defects" matches /defect/i and can satisfy that wait before
+    // async data + filter controls mount (especially on slower browsers).
+    await page.getByRole('heading', { name: 'All Defects' }).waitFor({ timeout: 15_000 });
   });
 
   test('renders defect sections and charts', async ({ demoPage: page }) => {
@@ -24,18 +25,22 @@ test.describe('Defects page', () => {
   });
 
   test('defect rows show severity badges', async ({ demoPage: page }) => {
-    const severities = ['Critical', 'Major', 'Minor', 'Trivial'];
-    let found = 0;
-    for (const sev of severities) {
-      const count = await page.getByText(sev, { exact: true }).count();
-      if (count > 0) found++;
-    }
-    expect(found).toBeGreaterThan(0);
+    const table = page.locator('table').first();
+    await expect(table.locator('tbody tr').first()).toBeVisible();
+
+    // Row badges use lowercase enum text (critical, high, …). Filter <option> labels match in
+    // Chromium but are not reliably discoverable via getByText in WebKit, so scope to the table.
+    await expect(
+      table.getByText(/^(critical|high|medium|low)$/).first(),
+    ).toBeVisible();
   });
 
   test('filter selects are present', async ({ demoPage: page }) => {
-    const selects = page.locator('select');
-    expect(await selects.count()).toBeGreaterThanOrEqual(1);
+    // Our Select primitive is a native <select>. Chromium maps it to role=combobox; Firefox
+    // often does not, so assert on the DOM instead of the ARIA role.
+    const filters = page.locator('select');
+    await expect(filters.first()).toBeVisible({ timeout: 15_000 });
+    expect(await filters.count()).toBeGreaterThanOrEqual(1);
   });
 
   test('charts render SVG elements', async ({ demoPage: page }) => {

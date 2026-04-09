@@ -1,3 +1,4 @@
+import type { Locator } from '@playwright/test';
 import { test, expect, DEMO_PROJECTS } from './fixtures/demo-mode';
 
 test.describe('Keyboard navigation', () => {
@@ -5,12 +6,29 @@ test.describe('Keyboard navigation', () => {
     await page.goto('/');
     await page.getByText('Quality Observability Dashboard').waitFor();
 
-    for (let i = 0; i < 5; i++) {
-      await page.keyboard.press('Tab');
-    }
+    const nav = page.getByRole('navigation', { name: 'Main navigation' });
+    const projects = nav.getByRole('link', { name: 'Projects' });
 
-    const focused = page.locator(':focus');
-    await expect(focused).toBeAttached();
+    await projects.focus();
+    const focusInside = (handle: Locator) =>
+      handle.evaluate((el: HTMLElement) => {
+        const a = document.activeElement;
+        return !!(a && (a === el || el.contains(a)));
+      });
+
+    expect(await focusInside(projects)).toBe(true);
+
+    // Tab may take more than one stop inside the Next.js link tree; then continues elsewhere
+    // (order differs by engine; WebKit may not land on the sidebar collapse control next).
+    let exitedProjects = false;
+    for (let j = 0; j < 6; j++) {
+      await page.keyboard.press('Tab');
+      if (!(await focusInside(projects))) {
+        exitedProjects = true;
+        break;
+      }
+    }
+    expect(exitedProjects).toBe(true);
   });
 
   test('Enter key activates focused links', async ({ demoPage: page }) => {
