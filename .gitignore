@@ -15,3 +15,4 @@ dist/
 packages/api/.env
 packages/web/playwright-report/*
 packages/web/test-results/*
+.DS_Store

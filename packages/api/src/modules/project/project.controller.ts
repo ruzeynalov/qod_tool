@@ -11,11 +11,14 @@ import {
   ParseUUIDPipe,
   ForbiddenException,
   NotFoundException,
+  UseGuards,
 } from '@nestjs/common';
 import { ProjectService } from './project.service';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
 import { AuditAction } from '../../common/interceptors/audit-log.interceptor';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
 
 @Controller('api/v1/projects')
 export class ProjectController {
@@ -23,8 +26,11 @@ export class ProjectController {
 
   @Get()
   findAll(@Query('orgId') orgId: string, @Req() req: any) {
-    // Non-admin users can only see projects in their org
-    const effectiveOrgId = req.user?.role === 'ADMIN' ? orgId : (req.user?.orgId ?? orgId);
+    const effectiveOrgId = req.user?.orgId ?? orgId;
+    // Non-admin users can only see projects they are members of
+    if (req.user?.role !== 'ADMIN') {
+      return this.projectService.findAllForUser(effectiveOrgId, req.user?.userId);
+    }
     return this.projectService.findAll(effectiveOrgId);
   }
 
@@ -47,6 +53,8 @@ export class ProjectController {
   }
 
   @Patch(':id')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
   @AuditAction({ action: 'project.updated', entityType: 'Project' })
   async update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateProjectDto, @Req() req: any) {
     await this.verifyProjectAccess(id, req);
@@ -54,6 +62,8 @@ export class ProjectController {
   }
 
   @Delete(':id')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
   @AuditAction({ action: 'project.deleted', entityType: 'Project' })
   async delete(@Param('id', ParseUUIDPipe) id: string, @Req() req: any) {
     await this.verifyProjectAccess(id, req);
@@ -70,6 +80,11 @@ export class ProjectController {
     if (user.role === 'ADMIN') return;
     if (project.orgId !== user.orgId) {
       throw new ForbiddenException('Access denied to this project');
+    }
+    // Check ProjectMember membership for non-admin users
+    const membership = await this.projectService.isMember(projectId, user.userId);
+    if (!membership) {
+      throw new ForbiddenException('You do not have access to this project');
     }
   }
 }

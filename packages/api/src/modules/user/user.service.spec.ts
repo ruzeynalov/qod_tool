@@ -10,10 +10,12 @@ describe('UserService', () => {
     id: 'user-uuid-1',
     orgId: 'org-uuid-1',
     email: 'test@example.com',
+    username: 'testuser',
     name: 'Test User',
     role: 'MEMBER',
     password: 'hashed-password',
     avatarUrl: null,
+    blockedAt: null,
     createdAt: new Date('2025-01-01'),
     updatedAt: new Date('2025-01-01'),
   };
@@ -150,6 +152,216 @@ describe('UserService', () => {
       await expect(service.delete('nonexistent-id')).rejects.toThrow(
         'Record to delete does not exist',
       );
+    });
+  });
+
+  describe('create()', () => {
+    it('should create a user with provided data', async () => {
+      const createData = {
+        orgId: 'org-uuid-1',
+        email: 'new@example.com',
+        username: 'newuser',
+        name: 'New User',
+        role: 'MEMBER',
+        passwordHash: 'hashed-pw',
+      };
+      const createdUser = {
+        ...mockUser,
+        id: 'new-user-uuid',
+        email: createData.email,
+        name: createData.name,
+      };
+
+      prisma.user.create.mockResolvedValue(createdUser);
+
+      const result = await service.create(createData);
+
+      expect(prisma.user.create).toHaveBeenCalledWith({
+        data: {
+          orgId: 'org-uuid-1',
+          email: 'new@example.com',
+          username: 'newuser',
+          name: 'New User',
+          role: 'MEMBER',
+          password: 'hashed-pw',
+        },
+        select: expect.objectContaining({ id: true, email: true, name: true, role: true }),
+      });
+      expect(result).toEqual(createdUser);
+    });
+  });
+
+  describe('block()', () => {
+    it('should set blockedAt to a Date', async () => {
+      const blockedUser = { ...mockUser, blockedAt: new Date('2026-04-13') };
+
+      prisma.user.update.mockResolvedValue(blockedUser);
+
+      const result = await service.block('user-uuid-1');
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-uuid-1' },
+        data: { blockedAt: expect.any(Date) },
+        select: expect.objectContaining({ id: true, email: true, blockedAt: true }),
+      });
+      expect(result).toEqual(blockedUser);
+      expect(result.blockedAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe('unblock()', () => {
+    it('should set blockedAt to null', async () => {
+      const unblockedUser = { ...mockUser, blockedAt: null };
+
+      prisma.user.update.mockResolvedValue(unblockedUser);
+
+      const result = await service.unblock('user-uuid-1');
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-uuid-1' },
+        data: { blockedAt: null },
+        select: expect.objectContaining({ id: true, email: true, blockedAt: true }),
+      });
+      expect(result).toEqual(unblockedUser);
+      expect(result.blockedAt).toBeNull();
+    });
+  });
+
+  describe('updatePassword()', () => {
+    it('should update the password and exclude it from the result', async () => {
+      const userWithoutPassword = { ...mockUser };
+
+      prisma.user.update.mockResolvedValue(userWithoutPassword);
+
+      const result = await service.updatePassword('user-uuid-1', 'new-hashed-password');
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-uuid-1' },
+        data: { password: 'new-hashed-password' },
+        select: expect.objectContaining({ id: true, email: true, name: true, role: true }),
+      });
+      expect(result).toEqual(userWithoutPassword);
+    });
+  });
+
+  describe('updateWithRole()', () => {
+    it('should update name, email, and role fields', async () => {
+      const dto = { name: 'Admin User', email: 'admin@example.com', role: 'ADMIN' };
+      const updatedUser = { ...mockUser, ...dto };
+
+      prisma.user.update.mockResolvedValue(updatedUser);
+
+      const result = await service.updateWithRole('user-uuid-1', dto);
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-uuid-1' },
+        data: dto,
+        select: expect.objectContaining({ id: true, email: true, name: true, role: true }),
+      });
+      expect(result).toEqual(updatedUser);
+      expect(result.name).toBe('Admin User');
+      expect(result.email).toBe('admin@example.com');
+      expect(result.role).toBe('ADMIN');
+    });
+  });
+
+  describe('getUserProjects()', () => {
+    it('should return project memberships with project info', async () => {
+      const memberships = [
+        {
+          id: 'pm-1',
+          userId: 'user-uuid-1',
+          projectId: 'proj-1',
+          role: 'MEMBER',
+          project: { id: 'proj-1', name: 'Project Alpha' },
+        },
+        {
+          id: 'pm-2',
+          userId: 'user-uuid-1',
+          projectId: 'proj-2',
+          role: 'EDITOR',
+          project: { id: 'proj-2', name: 'Project Beta' },
+        },
+      ];
+
+      prisma.projectMember.findMany.mockResolvedValue(memberships);
+
+      const result = await service.getUserProjects('user-uuid-1');
+
+      expect(prisma.projectMember.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId: 'user-uuid-1' },
+          include: expect.objectContaining({ project: expect.anything() }),
+        }),
+      );
+      expect(result).toEqual(memberships);
+      expect(result).toHaveLength(2);
+    });
+
+    it('should return empty array when user has no projects', async () => {
+      prisma.projectMember.findMany.mockResolvedValue([]);
+
+      const result = await service.getUserProjects('user-uuid-1');
+
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe('setProjectAccess()', () => {
+    it('should upsert project membership with compound key', async () => {
+      const membership = {
+        id: 'pm-1',
+        userId: 'user-uuid-1',
+        projectId: 'proj-1',
+        role: 'EDITOR',
+      };
+
+      prisma.projectMember.upsert.mockResolvedValue(membership);
+
+      const result = await service.setProjectAccess('user-uuid-1', 'proj-1', 'EDITOR');
+
+      expect(prisma.projectMember.upsert).toHaveBeenCalledWith({
+        where: {
+          projectId_userId: {
+            projectId: 'proj-1',
+            userId: 'user-uuid-1',
+          },
+        },
+        create: {
+          userId: 'user-uuid-1',
+          projectId: 'proj-1',
+          role: 'EDITOR',
+        },
+        update: {
+          role: 'EDITOR',
+        },
+      });
+      expect(result).toEqual(membership);
+    });
+  });
+
+  describe('removeProjectAccess()', () => {
+    it('should delete project membership with compound key', async () => {
+      const membership = {
+        id: 'pm-1',
+        userId: 'user-uuid-1',
+        projectId: 'proj-1',
+        role: 'MEMBER',
+      };
+
+      prisma.projectMember.delete.mockResolvedValue(membership);
+
+      const result = await service.removeProjectAccess('user-uuid-1', 'proj-1');
+
+      expect(prisma.projectMember.delete).toHaveBeenCalledWith({
+        where: {
+          projectId_userId: {
+            projectId: 'proj-1',
+            userId: 'user-uuid-1',
+          },
+        },
+      });
+      expect(result).toEqual(membership);
     });
   });
 });

@@ -59,7 +59,7 @@ export class ConnectorController {
 
   @Get('export')
   @UseGuards(RolesGuard)
-  @Roles('ADMIN', 'MANAGER')
+  @Roles('ADMIN')
   async exportAll(@Param('projectId', ParseUUIDPipe) projectId: string) {
     const connectors = await this.connectorService.findAll(projectId);
     const result = [];
@@ -89,6 +89,8 @@ export class ConnectorController {
   }
 
   @Post()
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
   @AuditAction({ action: 'connector.created', entityType: 'ConnectorConfig' })
   create(
     @Param('projectId', ParseUUIDPipe) projectId: string,
@@ -98,6 +100,8 @@ export class ConnectorController {
   }
 
   @Patch(':id')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
   @AuditAction({ action: 'connector.updated', entityType: 'ConnectorConfig' })
   async update(
     @Param('projectId', ParseUUIDPipe) projectId: string,
@@ -116,12 +120,16 @@ export class ConnectorController {
   }
 
   @Delete(':id')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
   @AuditAction({ action: 'connector.deleted', entityType: 'ConnectorConfig' })
   delete(@Param('id', ParseUUIDPipe) id: string) {
     return this.connectorService.delete(id);
   }
 
   @Post(':id/test')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
   async testConnection(
     @Param('id', ParseUUIDPipe) id: string,
   ) {

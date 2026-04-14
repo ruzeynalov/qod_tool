@@ -8,8 +8,8 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
 export default function LoginPage() {
   const router = useRouter();
-  const { login } = useAuth();
-  const [email, setEmail] = useState('');
+  const { login: authLogin } = useAuth();
+  const [loginValue, setLoginValue] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -23,16 +23,16 @@ export default function LoginPage() {
       const res = await fetch(`${API_BASE}/api/v1/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ login: loginValue, password }),
       });
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.message || 'Invalid email or password');
+        throw new Error(data.message || 'Invalid credentials');
       }
 
       const { accessToken, user } = await res.json();
-      login(accessToken, user);
+      authLogin(accessToken, user);
       router.push('/projects');
     } catch (err: any) {
       setError(err.message || 'Login failed');
@@ -60,16 +60,16 @@ export default function LoginPage() {
           )}
 
           <div>
-            <label htmlFor="email" className="mb-1 block text-xs font-medium text-secondary">
-              Email
+            <label htmlFor="login" className="mb-1 block text-xs font-medium text-secondary">
+              Email or Username
             </label>
             <input
-              id="email"
-              type="email"
+              id="login"
+              type="text"
               required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="admin@qod.dev"
+              value={loginValue}
+              onChange={(e) => setLoginValue(e.target.value)}
+              placeholder="Enter your email or username"
               className="w-full rounded-md border border-qod-border bg-qod-bg px-3 py-2 text-sm text-primary placeholder:text-muted focus:border-qod-accent focus:outline-none"
             />
           </div>
@@ -97,10 +97,6 @@ export default function LoginPage() {
             {loading ? 'Signing in...' : 'Sign in'}
           </button>
         </form>
-
-        <p className="text-center text-xs text-muted">
-          Seed default: admin@qod.dev / admin123
-        </p>
       </div>
     </div>
   );

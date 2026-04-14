@@ -48,24 +48,27 @@ describe('RolesGuard', () => {
   });
 
   it('should allow access when global role matches', async () => {
-    const ctx = createContext({}, { userId: 'u1', role: 'ADMIN' }, ['ADMIN', 'MANAGER']);
+    const ctx = createContext({}, { userId: 'u1', role: 'ADMIN' }, ['ADMIN']);
     expect(await guard.canActivate(ctx)).toBe(true);
     expect(prisma.projectMember.findFirst).not.toHaveBeenCalled();
   });
 
   it('should deny access when global role does not match and no projectId', async () => {
-    const ctx = createContext({}, { userId: 'u1', role: 'VIEWER' }, ['ADMIN', 'MANAGER']);
+    const ctx = createContext({}, { userId: 'u1', role: 'MEMBER' }, ['ADMIN']);
     expect(await guard.canActivate(ctx)).toBe(false);
   });
 
-  it('should allow access when project role matches', async () => {
-    prisma.projectMember.findFirst.mockResolvedValue({ role: 'MANAGER' });
+  it('should fall through to project role check when global role does not match', async () => {
+    prisma.projectMember.findFirst.mockResolvedValue({ role: 'MEMBER' });
+    // Required: ['ADMIN', 'MEMBER'] — user global role is MEMBER which matches directly
+    // So we test with required=['ADMIN'] to force project-level fallback
     const ctx = createContext(
       { projectId: 'p1' },
       { userId: 'u1', role: 'MEMBER' },
-      ['ADMIN', 'MANAGER'],
+      ['ADMIN'],
     );
-    expect(await guard.canActivate(ctx)).toBe(true);
+    // Should still deny because project role MEMBER doesn't match required ADMIN
+    expect(await guard.canActivate(ctx)).toBe(false);
     expect(prisma.projectMember.findFirst).toHaveBeenCalledWith({
       where: { projectId: 'p1', userId: 'u1' },
       select: { role: true },
@@ -73,11 +76,11 @@ describe('RolesGuard', () => {
   });
 
   it('should deny access when neither global nor project role matches', async () => {
-    prisma.projectMember.findFirst.mockResolvedValue({ role: 'VIEWER' });
+    prisma.projectMember.findFirst.mockResolvedValue({ role: 'MEMBER' });
     const ctx = createContext(
       { projectId: 'p1' },
       { userId: 'u1', role: 'MEMBER' },
-      ['ADMIN', 'MANAGER'],
+      ['ADMIN'],
     );
     expect(await guard.canActivate(ctx)).toBe(false);
   });
@@ -87,7 +90,7 @@ describe('RolesGuard', () => {
     const ctx = createContext(
       { projectId: 'p1' },
       { userId: 'u1', role: 'MEMBER' },
-      ['ADMIN', 'MANAGER'],
+      ['ADMIN'],
     );
     expect(await guard.canActivate(ctx)).toBe(false);
   });

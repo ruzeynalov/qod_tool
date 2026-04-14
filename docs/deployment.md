@@ -11,11 +11,6 @@ web:
       NEXT_PUBLIC_API_URL: http://your-server:4000
 ```
 
-## Default Seed Credentials
+## Default Seed Users
 
-| Field | Value |
-|-------|-------|
-| Email | `admin@qod.dev` |
-| Password | `admin123` |
-
-There is no login UI yet — the frontend uses demo mode with client-side data or connects to the API for live data.
+The seed script creates an admin and a member user. Credentials are defined in `packages/api/src/database/seeds/seed.ts`. Change these before deploying to production.

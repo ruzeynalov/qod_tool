@@ -12,6 +12,8 @@ import {
 import { KPIService } from './kpi.service';
 import { UpsertTargetDto } from './dto/upsert-target.dto';
 import { ProjectAccessGuard } from '../../common/guards/project-access.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
 
 const VALID_KPI_METRICS = [
   'PASS_RATE',
@@ -57,6 +59,8 @@ export class KPIController {
   }
 
   @Put('targets/:metric')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
   upsertTarget(
     @Param('projectId', ParseUUIDPipe) projectId: string,
     @Param('metric') metric: string,

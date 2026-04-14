@@ -3,13 +3,14 @@
 import { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Sun, Moon, ChevronRight, User, Paintbrush, Check, LogOut } from 'lucide-react';
+import { Sun, Moon, ChevronRight, User, Paintbrush, Check, LogOut, Settings } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useTheme, type Skin } from '@/app/_providers/theme-provider';
 import { useDemoMode } from '@/app/_providers/demo-mode-provider';
 import { useAuth } from '@/app/_providers/auth-provider';
 import { useProjects } from '@/lib/api/hooks';
 import { cn } from '@/lib/utils/cn';
+import { UserSettingsDialog } from './user-settings-dialog';
 
 function useBreadcrumbs(pathname: string) {
   const { data: projects } = useProjects();
@@ -52,10 +53,11 @@ export function Header() {
   const router = useRouter();
   const { theme, skin, toggleTheme, setSkin } = useTheme();
   const { demoMode, toggleDemoMode } = useDemoMode();
-  const { user, isAuthenticated, logout } = useAuth();
+  const { user, isAuthenticated, logout, login } = useAuth();
   const breadcrumbs = useBreadcrumbs(pathname);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showSkinMenu, setShowSkinMenu] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const skinRef = useRef<HTMLDivElement>(null);
 
@@ -177,17 +179,29 @@ export function Header() {
                 </p>
               </div>
               {isAuthenticated && !demoMode && (
-                <button
-                  onClick={() => {
-                    logout();
-                    setShowUserMenu(false);
-                    router.push('/login');
-                  }}
-                  className="flex w-full items-center gap-2 px-3 py-2.5 text-sm text-secondary transition-colors hover:bg-qod-bg hover:text-primary"
-                >
-                  <LogOut className="h-3.5 w-3.5" />
-                  Sign out
-                </button>
+                <>
+                  <button
+                    onClick={() => {
+                      setShowUserMenu(false);
+                      setShowSettings(true);
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-2.5 text-sm text-secondary transition-colors hover:bg-qod-bg hover:text-primary"
+                  >
+                    <Settings className="h-3.5 w-3.5" />
+                    Settings
+                  </button>
+                  <button
+                    onClick={() => {
+                      logout();
+                      setShowUserMenu(false);
+                      router.push('/login');
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-2.5 text-sm text-secondary transition-colors hover:bg-qod-bg hover:text-primary"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    Sign out
+                  </button>
+                </>
               )}
               {!isAuthenticated && !demoMode && (
                 <button
@@ -205,6 +219,20 @@ export function Header() {
           )}
         </div>
       </div>
+      {/* User Settings Dialog */}
+      {showSettings && (
+        <UserSettingsDialog
+          open={showSettings}
+          onClose={() => setShowSettings(false)}
+          user={user}
+          onProfileUpdate={(updated) => {
+            // Update local auth state with new name
+            if (user) {
+              login(localStorage.getItem('qod-auth-token') ?? '', { ...user, name: updated.name });
+            }
+          }}
+        />
+      )}
     </header>
   );
 }

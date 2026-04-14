@@ -47,6 +47,7 @@ import { useProject } from '@/lib/api/hooks';
 import { apiClient } from '@/lib/api/client';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useDemoMode } from '@/app/_providers/demo-mode-provider';
+import { useAuth } from '@/app/_providers/auth-provider';
 
 // ─── Tab definitions ───────────────────────────────────────────────────
 
@@ -178,7 +179,7 @@ function ragToBadgeVariant(rag: 'GREEN' | 'AMBER' | 'RED') {
 
 // ─── Connectors Tab ──────────────────────────────────────────────────
 
-function ConnectorsTab({ projectId }: { projectId: string }) {
+function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; readOnly?: boolean }) {
   const queryClient = useQueryClient();
   const { data: rawConnectors = [] } = useQuery<any[]>({
     queryKey: ['connectors', projectId],
@@ -707,30 +708,34 @@ function ConnectorsTab({ projectId }: { projectId: string }) {
         <EmptyState
           icon={<Plug2 className="h-10 w-10" />}
           title="No connectors configured"
-          description="Connect your test management tools, CI/CD pipelines, and defect trackers to import real data."
+          description={readOnly
+            ? "No connectors have been configured for this project yet. Contact an administrator to set up data sources."
+            : "Connect your test management tools, CI/CD pipelines, and defect trackers to import real data."}
           action={
-            <div className="flex items-center gap-2">
-              <Button onClick={() => setShowAddForm(true)}>
-                <Plus className="h-4 w-4" />
-                Add Connector
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={importing}
-                onClick={() => importInputRef.current?.click()}
-              >
-                <Upload className="h-3.5 w-3.5" />
-                {importing ? 'Importing...' : 'Import'}
-              </Button>
-              <input
-                ref={importInputRef}
-                type="file"
-                accept=".json"
-                className="hidden"
-                onChange={handleImport}
-              />
-            </div>
+            !readOnly ? (
+              <div className="flex items-center gap-2">
+                <Button onClick={() => setShowAddForm(true)}>
+                  <Plus className="h-4 w-4" />
+                  Add Connector
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={importing}
+                  onClick={() => importInputRef.current?.click()}
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                  {importing ? 'Importing...' : 'Import'}
+                </Button>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept=".json"
+                  className="hidden"
+                  onChange={handleImport}
+                />
+              </div>
+            ) : undefined
           }
         />
         {importMessage && (
@@ -821,9 +826,11 @@ function ConnectorsTab({ projectId }: { projectId: string }) {
                     </div>
                   </div>
                   <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="sm" title="Edit" onClick={() => startEditing(connector.id)}>
-                      <Pencil className="h-3.5 w-3.5" />
-                    </Button>
+                    {!readOnly && (
+                      <Button variant="ghost" size="sm" title="Edit" onClick={() => startEditing(connector.id)}>
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
                     <Button
                       variant="ghost"
                       size="sm"
@@ -833,21 +840,25 @@ function ConnectorsTab({ projectId }: { projectId: string }) {
                     >
                       <RefreshCw className={cn("h-3.5 w-3.5", syncingIds.has(connector.id) && "animate-spin")} />
                     </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      title={connector.status === 'paused' ? 'Resume' : 'Pause'}
-                      onClick={() => handleTogglePause(connector)}
-                    >
-                      {connector.status === 'paused' ? (
-                        <Play className="h-3.5 w-3.5" />
-                      ) : (
-                        <Pause className="h-3.5 w-3.5" />
-                      )}
-                    </Button>
-                    <Button variant="ghost" size="sm" title="Delete" className="text-rag-red hover:text-rag-red" onClick={() => handleDelete(connector.id)}>
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                    {!readOnly && (
+                      <>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          title={connector.status === 'paused' ? 'Resume' : 'Pause'}
+                          onClick={() => handleTogglePause(connector)}
+                        >
+                          {connector.status === 'paused' ? (
+                            <Play className="h-3.5 w-3.5" />
+                          ) : (
+                            <Pause className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                        <Button variant="ghost" size="sm" title="Delete" className="text-rag-red hover:text-rag-red" onClick={() => handleDelete(connector.id)}>
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </>
+                    )}
                   </div>
                 </div>
                 {/* Sync progress / status banner */}
@@ -1114,26 +1125,27 @@ function ConnectorsTab({ projectId }: { projectId: string }) {
         </Card>
       ) : (
         <div className="space-y-3">
-          <div className="flex items-center gap-2">
-            <Button onClick={() => setShowAddForm(true)}>
-              <Plus className="h-4 w-4" />
-              Add Connector
-            </Button>
-            {connectors.length > 0 && (
-              <Button variant="secondary" size="sm" onClick={handleExport}>
-                <Download className="h-3.5 w-3.5" />
-                Export
+          {!readOnly && (
+            <div className="flex items-center gap-2">
+              <Button onClick={() => setShowAddForm(true)}>
+                <Plus className="h-4 w-4" />
+                Add Connector
               </Button>
-            )}
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={importing}
-              onClick={() => importInputRef.current?.click()}
-            >
-              <Upload className="h-3.5 w-3.5" />
-              {importing ? 'Importing...' : 'Import'}
-            </Button>
+              {connectors.length > 0 && (
+                <Button variant="secondary" size="sm" onClick={handleExport}>
+                  <Download className="h-3.5 w-3.5" />
+                  Export
+                </Button>
+              )}
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={importing}
+                onClick={() => importInputRef.current?.click()}
+              >
+                <Upload className="h-3.5 w-3.5" />
+                {importing ? 'Importing...' : 'Import'}
+              </Button>
             <input
               ref={importInputRef}
               type="file"
@@ -1142,7 +1154,8 @@ function ConnectorsTab({ projectId }: { projectId: string }) {
               onChange={handleImport}
             />
           </div>
-          {importMessage && (
+          )}
+          {!readOnly && importMessage && (
             <div className={cn(
               'rounded-md border px-3 py-2 text-xs font-medium',
               importMessage.type === 'success'
@@ -1824,6 +1837,7 @@ export default function ProjectSettingsPage() {
   const id = params?.id ?? '';
   const [activeTab, setActiveTab] = useState('connectors');
   const { demoMode } = useDemoMode();
+  const { isAdmin } = useAuth();
 
   const isEditableTab = activeTab === 'connectors' || activeTab === 'kpi-thresholds' || activeTab === 'general';
 
@@ -1831,15 +1845,26 @@ export default function ProjectSettingsPage() {
     <div className="space-y-6">
       <Tabs tabs={settingsTabs} activeTab={activeTab} onTabChange={setActiveTab} />
 
-      {demoMode && isEditableTab && (
+      {(demoMode || !isAdmin) && isEditableTab && (
         <div className="flex items-center gap-2 rounded-md border border-rag-amber/30 bg-rag-amber/5 px-4 py-2.5 text-sm text-rag-amber">
           <Info className="h-3.5 w-3.5 shrink-0" />
-          Settings are read-only in demo mode. Disable demo mode to make changes.
+          {demoMode
+            ? 'Settings are read-only in demo mode. Disable demo mode to make changes.'
+            : activeTab === 'connectors'
+              ? 'Connector configuration is read-only. You can trigger sync for configured connectors.'
+              : 'Settings are read-only. Only administrators can modify settings.'}
         </div>
       )}
 
-      <div className={demoMode && isEditableTab ? 'pointer-events-none opacity-50' : ''}>
-        {activeTab === 'connectors' && <ConnectorsTab projectId={id} />}
+      {/* Connectors tab: members can sync but not edit — rendered outside the inert wrapper */}
+      {activeTab === 'connectors' && <ConnectorsTab projectId={id} readOnly={!isAdmin || demoMode} />}
+
+      {/* Other editable tabs: fully locked for non-admins */}
+      <div
+        className={(demoMode || !isAdmin) && isEditableTab && activeTab !== 'connectors' ? 'pointer-events-none opacity-50' : ''}
+        // eslint-disable-next-line
+        {...((demoMode || !isAdmin) && isEditableTab && activeTab !== 'connectors' ? { inert: '' as any } : {})}
+      >
         {activeTab === 'kpi-thresholds' && <KPIThresholdsTab />}
         {activeTab === 'kpi-formulas' && <KPIFormulasTab />}
         {activeTab === 'general' && <GeneralTab />}

@@ -65,19 +65,42 @@ async function main() {
     create: {
       orgId: org.id,
       email: 'admin@qod.dev',
+      username: 'admin',
       name: 'Admin',
       password: hashPassword('admin123'),
       role: 'ADMIN',
     },
     update: {
       orgId: org.id,
+      username: 'admin',
       name: 'Admin',
       role: 'ADMIN',
     },
   });
   console.log(`Admin user: ${adminUser.email} (${adminUser.id})`);
 
-  // 3. Create demo projects with KPI targets and project memberships
+  // 3. Create member user
+  const memberUser = await prisma.user.upsert({
+    where: { email: 'member@qod.dev' },
+    create: {
+      orgId: org.id,
+      email: 'member@qod.dev',
+      username: 'member',
+      name: 'Team Member',
+      password: hashPassword('member123'),
+      role: 'MEMBER',
+    },
+    update: {
+      orgId: org.id,
+      username: 'member',
+      name: 'Team Member',
+      role: 'MEMBER',
+    },
+  });
+  console.log(`Member user: ${memberUser.email} (${memberUser.id})`);
+
+  // 4. Create demo projects with KPI targets and project memberships
+  const createdProjects: { id: string; name: string; slug: string }[] = [];
   for (const projectDef of DEMO_PROJECTS) {
     const project = await prisma.project.upsert({
       where: {
@@ -97,9 +120,10 @@ async function main() {
         demoMode: true,
       },
     });
+    createdProjects.push({ id: project.id, name: project.name, slug: projectDef.slug });
     console.log(`Project: ${project.name} (${project.id})`);
 
-    // 4. Create KPI targets for the project
+    // Create KPI targets for the project
     for (const kpi of KPI_TARGETS) {
       await prisma.kPITarget.upsert({
         where: {
@@ -124,7 +148,7 @@ async function main() {
     }
     console.log(`  KPI targets created (${KPI_TARGETS.length})`);
 
-    // 5. Create ProjectMember linking admin to this project as MANAGER
+    // Create ProjectMember linking admin to this project as MEMBER
     await prisma.projectMember.upsert({
       where: {
         projectId_userId: {
@@ -135,13 +159,34 @@ async function main() {
       create: {
         projectId: project.id,
         userId: adminUser.id,
-        role: 'MANAGER',
+        role: 'MEMBER',
       },
       update: {
-        role: 'MANAGER',
+        role: 'MEMBER',
       },
     });
-    console.log(`  Admin linked as MANAGER`);
+    console.log(`  Admin linked as MEMBER`);
+  }
+
+  // 5. Assign member user to E-Commerce Platform and Mobile Banking App
+  const ecommerce = createdProjects.find(p => p.slug === 'e-commerce-platform');
+  const banking = createdProjects.find(p => p.slug === 'mobile-banking-app');
+
+  if (ecommerce) {
+    await prisma.projectMember.upsert({
+      where: { projectId_userId: { projectId: ecommerce.id, userId: memberUser.id } },
+      create: { projectId: ecommerce.id, userId: memberUser.id, role: 'MEMBER' },
+      update: { role: 'MEMBER' },
+    });
+    console.log(`  Member linked to ${ecommerce.name} as MEMBER`);
+  }
+  if (banking) {
+    await prisma.projectMember.upsert({
+      where: { projectId_userId: { projectId: banking.id, userId: memberUser.id } },
+      create: { projectId: banking.id, userId: memberUser.id, role: 'MEMBER' },
+      update: { role: 'MEMBER' },
+    });
+    console.log(`  Member linked to ${banking.name} as MEMBER`);
   }
 
   console.log('Seed completed successfully.');

@@ -41,6 +41,17 @@ export class ProjectAccessGuard implements CanActivate {
       throw new ForbiddenException('Access denied to this project');
     }
 
+    // Check ProjectMember membership for non-ADMIN users
+    const membership = await this.prisma.projectMember.findUnique({
+      where: {
+        projectId_userId: { projectId, userId: user.userId },
+      },
+    });
+
+    if (!membership) {
+      throw new ForbiddenException('You do not have access to this project');
+    }
+
     return true;
   }
 }

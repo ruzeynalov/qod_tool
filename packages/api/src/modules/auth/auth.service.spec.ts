@@ -132,6 +132,49 @@ describe('AuthService', () => {
 
       expect(result).toBeNull();
     });
+
+    it('should return null when user is blocked', async () => {
+      const password = 'CorrectPassword123';
+      const hash = await service.hashPassword(password);
+      const blockedUser = { ...mockUser, password: hash, blockedAt: new Date('2026-01-01') };
+
+      prisma.user.findUnique.mockResolvedValue(blockedUser);
+
+      const result = await service.validateUser('test@example.com', password);
+
+      expect(result).toBeNull();
+    });
+
+    it('should look up by username when login does not contain @', async () => {
+      const password = 'CorrectPassword123';
+      const hash = await service.hashPassword(password);
+      const userWithHash = { ...mockUser, password: hash };
+
+      prisma.user.findUnique.mockResolvedValue(userWithHash);
+
+      const result = await service.validateUser('testuser', password);
+
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { username: 'testuser' },
+      });
+      expect(result).toBeDefined();
+      expect(result!.id).toBe(mockUser.id);
+    });
+
+    it('should look up by email when login contains @', async () => {
+      const password = 'CorrectPassword123';
+      const hash = await service.hashPassword(password);
+      const userWithHash = { ...mockUser, password: hash };
+
+      prisma.user.findUnique.mockResolvedValue(userWithHash);
+
+      const result = await service.validateUser('test@example.com', password);
+
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { email: 'test@example.com' },
+      });
+      expect(result).toBeDefined();
+    });
   });
 
   describe('login()', () => {
@@ -307,6 +350,7 @@ describe('AuthService', () => {
         data: {
           orgId,
           email: dto.email,
+          username: 'new',
           name: dto.name,
           password: expect.any(String),
         },

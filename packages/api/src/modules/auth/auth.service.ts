@@ -58,10 +58,16 @@ export class AuthService {
     }
   }
 
-  async validateUser(email: string, password: string) {
-    const user = await this.prisma.user.findUnique({ where: { email } });
+  async validateUser(login: string, password: string) {
+    // Support login with email or username
+    const isEmail = login.includes('@');
+    const user = isEmail
+      ? await this.prisma.user.findUnique({ where: { email: login } })
+      : await this.prisma.user.findUnique({ where: { username: login } });
 
     if (!user || !user.password) return null;
+
+    if (user.blockedAt) return null;
 
     const isValid = await this.verifyPassword(password, user.password);
     if (!isValid) return null;
@@ -98,11 +104,18 @@ export class AuthService {
     );
     if (rawPayload.type !== 'refresh') return null;
 
+    // Fetch current user state from DB (role may have changed, user may be blocked)
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.userId },
+      select: { role: true, blockedAt: true },
+    });
+    if (!user || user.blockedAt) return null;
+
     const accessToken = this.createToken(
       {
         userId: payload.userId,
         email: payload.email,
-        role: payload.role,
+        role: user.role, // Fresh role from DB, not stale token
         orgId: payload.orgId,
       },
       this.jwtSecret,
@@ -124,6 +137,7 @@ export class AuthService {
       data: {
         orgId,
         email: dto.email,
+        username: dto.email.split('@')[0],
         name: dto.name,
         password: hashedPassword,
       },

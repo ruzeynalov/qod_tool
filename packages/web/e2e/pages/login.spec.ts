@@ -11,22 +11,22 @@ test.describe('Login page', () => {
 
   test('renders the login form with all elements', async () => {
     await expect(loginPage.heading).toBeVisible();
-    await expect(loginPage.emailInput).toBeVisible();
+    await expect(loginPage.loginInput).toBeVisible();
     await expect(loginPage.passwordInput).toBeVisible();
     await expect(loginPage.submitButton).toBeVisible();
     await expect(loginPage.submitButton).toHaveText('Sign in');
   });
 
-  test('email input has correct placeholder', async () => {
-    await expect(loginPage.emailInput).toHaveAttribute('placeholder', 'admin@qod.dev');
+  test('login input has correct placeholder', async () => {
+    await expect(loginPage.loginInput).toHaveAttribute('placeholder', 'Enter your email or username');
   });
 
   test('password input is masked', async () => {
     await expect(loginPage.passwordInput).toHaveAttribute('type', 'password');
   });
 
-  test('shows default credentials hint', async ({ page }) => {
-    await expect(page.getByText('admin@qod.dev / admin123')).toBeVisible();
+  test('does not show default credentials hint', async ({ page }) => {
+    await expect(page.getByText('user@test.com / testpass')).not.toBeVisible();
   });
 
   test('submit button shows loading state', async ({ page }) => {
@@ -36,8 +36,8 @@ test.describe('Login page', () => {
       await route.fulfill({ status: 200, json: { accessToken: 'tok', user: { id: '1', email: 'a', name: 'A', role: 'admin', orgId: 'o' } } });
     });
 
-    await loginPage.emailInput.fill('admin@qod.dev');
-    await loginPage.passwordInput.fill('admin123');
+    await loginPage.loginInput.fill('user@test.com');
+    await loginPage.passwordInput.fill('testpass');
     // Click and immediately check for loading text
     const submitBtn = page.locator('button[type="submit"]');
     await submitBtn.click();
@@ -48,19 +48,19 @@ test.describe('Login page', () => {
     await page.route('**/api/v1/auth/login', (route) =>
       route.fulfill({
         status: 401,
-        json: { message: 'Invalid email or password' },
+        json: { message: 'Invalid credentials' },
       }),
     );
 
     await loginPage.login('bad@email.com', 'wrong');
     await expect(loginPage.errorAlert).toBeVisible();
-    await expect(loginPage.errorAlert).toContainText('Invalid email or password');
+    await expect(loginPage.errorAlert).toContainText('Invalid credentials');
   });
 
   test('shows error on network failure', async ({ page }) => {
     await page.route('**/api/v1/auth/login', (route) => route.abort());
 
-    await loginPage.login('admin@qod.dev', 'admin123');
+    await loginPage.login('user@test.com', 'testpass');
     await expect(loginPage.errorAlert).toBeVisible();
   });
 
@@ -70,18 +70,34 @@ test.describe('Login page', () => {
         status: 200,
         json: {
           accessToken: 'fake-token',
-          user: { id: '1', email: 'admin@qod.dev', name: 'Admin', role: 'admin', orgId: 'org1' },
+          user: { id: '1', email: 'user@test.com', name: 'Admin', role: 'admin', orgId: 'org1' },
         },
       }),
     );
 
-    await loginPage.login('admin@qod.dev', 'admin123');
+    await loginPage.login('user@test.com', 'testpass');
+    await page.waitForURL('**/projects');
+    await expect(page).toHaveURL(/\/projects/);
+  });
+
+  test('supports login with username', async ({ page }) => {
+    await page.route('**/api/v1/auth/login', (route) =>
+      route.fulfill({
+        status: 200,
+        json: {
+          accessToken: 'fake-token',
+          user: { id: '1', email: 'user@test.com', name: 'Admin', role: 'admin', orgId: 'org1' },
+        },
+      }),
+    );
+
+    await loginPage.login('admin', 'testpass');
     await page.waitForURL('**/projects');
     await expect(page).toHaveURL(/\/projects/);
   });
 
   test('form validates required fields', async () => {
-    await expect(loginPage.emailInput).toHaveAttribute('required', '');
+    await expect(loginPage.loginInput).toHaveAttribute('required', '');
     await expect(loginPage.passwordInput).toHaveAttribute('required', '');
   });
 });

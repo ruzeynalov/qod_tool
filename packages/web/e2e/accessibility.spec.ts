@@ -50,7 +50,7 @@ test.describe('Semantic HTML', () => {
     await page.goto('/login');
     await page.getByRole('heading', { name: /sign in/i }).waitFor();
 
-    await expect(page.locator('#email')).toHaveAttribute('type', 'email');
+    await expect(page.locator('#login')).toHaveAttribute('type', 'text');
     await expect(page.locator('#password')).toHaveAttribute('type', 'password');
   });
 
@@ -62,7 +62,7 @@ test.describe('Semantic HTML', () => {
       route.fulfill({ status: 401, json: { message: 'Bad creds' } }),
     );
 
-    await page.locator('#email').fill('bad@test.com');
+    await page.locator('#login').fill('bad@test.com');
     await page.locator('#password').fill('wrong');
     await page.getByRole('button', { name: /sign in/i }).click();
 

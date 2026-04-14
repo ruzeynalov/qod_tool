@@ -8,8 +8,9 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 
-interface AuthUser {
+export interface AuthUser {
   id: string;
   email: string;
   name: string;
@@ -23,6 +24,7 @@ interface AuthContextValue {
   login: (token: string, user: AuthUser) => void;
   logout: () => void;
   isAuthenticated: boolean;
+  isAdmin: boolean;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -31,6 +33,7 @@ const TOKEN_KEY = 'qod-auth-token';
 const USER_KEY = 'qod-auth-user';
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [mounted, setMounted] = useState(false);
@@ -54,20 +57,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(newUser);
     localStorage.setItem(TOKEN_KEY, newToken);
     localStorage.setItem(USER_KEY, JSON.stringify(newUser));
-  }, []);
+    queryClient.clear();
+  }, [queryClient]);
 
   const logout = useCallback(() => {
     setToken(null);
     setUser(null);
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
-  }, []);
+    queryClient.clear();
+  }, [queryClient]);
 
   if (!mounted) return null;
 
   return (
     <AuthContext.Provider
-      value={{ token, user, login, logout, isAuthenticated: !!token }}
+      value={{ token, user, login, logout, isAuthenticated: !!token, isAdmin: user?.role === 'ADMIN' }}
     >
       {children}
     </AuthContext.Provider>

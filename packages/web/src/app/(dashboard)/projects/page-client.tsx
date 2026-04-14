@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import { useProjects } from '@/lib/api/hooks';
+import { useAuth } from '@/app/_providers/auth-provider';
 import { useDemoMode } from '@/app/_providers/demo-mode-provider';
 import { getDemoDataForProject, getDemoKPIDashboard } from '@/lib/demo/demo-data-provider';
 import { apiClient } from '@/lib/api/client';
@@ -30,6 +31,7 @@ export default function ProjectsPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { demoMode } = useDemoMode();
+  const { isAdmin } = useAuth();
   const { data: projects = [], isLoading } = useProjects();
 
   const realProjectIds = useMemo(
@@ -136,13 +138,15 @@ export default function ProjectsPage() {
             {projects.length} projects configured
           </p>
         </div>
-        <button
-          onClick={() => setShowNewProject(true)}
-          className="flex items-center gap-2 rounded-lg bg-qod-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-qod-accent/90"
-        >
-          <Plus className="h-4 w-4" />
-          New Project
-        </button>
+        {(isAdmin || demoMode) && (
+          <button
+            onClick={() => setShowNewProject(true)}
+            className="flex items-center gap-2 rounded-lg bg-qod-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-qod-accent/90"
+          >
+            <Plus className="h-4 w-4" />
+            New Project
+          </button>
+        )}
       </div>
 
       {/* New Project Dialog */}
@@ -201,7 +205,11 @@ export default function ProjectsPage() {
       {projects.length === 0 ? (
         <div className="card p-12 text-center">
           <FolderKanban className="mx-auto h-10 w-10 text-muted" />
-          <p className="mt-3 text-sm text-muted">No projects yet. Click &quot;New Project&quot; to get started.</p>
+          <p className="mt-3 text-sm text-muted">
+            {isAdmin
+              ? 'No projects yet. Click "New Project" to get started.'
+              : 'No projects assigned. Contact an administrator to request access.'}
+          </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3">

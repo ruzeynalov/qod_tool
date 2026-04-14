@@ -4,7 +4,10 @@ import { PrismaService } from '../../database/prisma.service';
 
 describe('ProjectAccessGuard', () => {
   let guard: ProjectAccessGuard;
-  let prisma: { project: { findUnique: ReturnType<typeof vi.fn> } };
+  let prisma: {
+    project: { findUnique: ReturnType<typeof vi.fn> };
+    projectMember: { findUnique: ReturnType<typeof vi.fn> };
+  };
 
   function createContext(
     params: Record<string, string> = {},
@@ -19,7 +22,10 @@ describe('ProjectAccessGuard', () => {
   }
 
   beforeEach(() => {
-    prisma = { project: { findUnique: vi.fn() } };
+    prisma = {
+      project: { findUnique: vi.fn() },
+      projectMember: { findUnique: vi.fn() },
+    };
     guard = new ProjectAccessGuard(prisma as unknown as PrismaService);
   });
 
@@ -40,8 +46,9 @@ describe('ProjectAccessGuard', () => {
     expect(await guard.canActivate(ctx)).toBe(true);
   });
 
-  it('should allow when user orgId matches project orgId', async () => {
+  it('should allow when user orgId matches and has ProjectMember membership', async () => {
     prisma.project.findUnique.mockResolvedValue({ orgId: 'org1' });
+    prisma.projectMember.findUnique.mockResolvedValue({ userId: 'u1', projectId: 'p1', role: 'MEMBER' });
     const ctx = createContext({ projectId: 'p1' }, { userId: 'u1', orgId: 'org1', role: 'MEMBER' });
     expect(await guard.canActivate(ctx)).toBe(true);
   });
@@ -52,6 +59,21 @@ describe('ProjectAccessGuard', () => {
     await expect(guard.canActivate(ctx)).rejects.toThrow(ForbiddenException);
   });
 
+  it('should throw ForbiddenException when non-ADMIN user has no ProjectMember', async () => {
+    prisma.project.findUnique.mockResolvedValue({ orgId: 'org1' });
+    prisma.projectMember.findUnique.mockResolvedValue(null);
+    const ctx = createContext({ projectId: 'p1' }, { userId: 'u1', orgId: 'org1', role: 'MEMBER' });
+    await expect(guard.canActivate(ctx)).rejects.toThrow(ForbiddenException);
+  });
+
+  it('should allow ADMIN even without ProjectMember record', async () => {
+    prisma.project.findUnique.mockResolvedValue({ orgId: 'org-other' });
+    const ctx = createContext({ projectId: 'p1' }, { userId: 'u1', orgId: 'org1', role: 'ADMIN' });
+    expect(await guard.canActivate(ctx)).toBe(true);
+    // Should not even check ProjectMember for ADMIN
+    expect(prisma.projectMember.findUnique).not.toHaveBeenCalled();
+  });
+
   it('should allow when no user is attached (public route)', async () => {
     prisma.project.findUnique.mockResolvedValue({ orgId: 'org1' });
     const ctx = createContext({ projectId: 'p1' });
@@ -60,6 +82,7 @@ describe('ProjectAccessGuard', () => {
 
   it('should query project with only orgId selected', async () => {
     prisma.project.findUnique.mockResolvedValue({ orgId: 'org1' });
+    prisma.projectMember.findUnique.mockResolvedValue({ userId: 'u1', projectId: 'p1', role: 'MEMBER' });
     const ctx = createContext({ projectId: 'p1' }, { userId: 'u1', orgId: 'org1', role: 'MEMBER' });
     await guard.canActivate(ctx);
     expect(prisma.project.findUnique).toHaveBeenCalledWith({
