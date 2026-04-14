@@ -19,6 +19,9 @@ cd deploy/docker-compose && docker compose up --build -d
 
 That's it. Open **http://localhost:3000**. The API auto-runs Prisma migrations and seeds the database on first start.
 
+
+Default seed users are created on first start. Credentials are set in `packages/api/src/database/seeds/seed.ts`. Login accepts email or username.
+
 #### Dev Override
 
 To expose PostgreSQL (5432) and Redis (6379) ports to the host for local debugging or direct DB access, add the dev override file:
@@ -40,7 +43,7 @@ After launching QOD, configure connectors to start ingesting data from your tool
 
 > **Quick example** — Jira: grab an [API token](https://id.atlassian.com/manage-profile/security/api-tokens), enter your Atlassian base URL and email, set the JQL filter, and hit **Test Connection**.
 
-For step-by-step instructions, see the [Connector Setup Guide](docs/connector-setup.md).
+For step-by-step instructions, see the [Connector Setup Guide](docs/connector-setup.md). For user management details, see [User Management & RBAC](docs/user-management.md).
 
 ## Features
 
@@ -90,6 +93,15 @@ For step-by-step instructions, see the [Connector Setup Guide](docs/connector-se
 - Connector export/import (JSON) for backup and cross-project transfer
 - KPI threshold editor with live RAG preview
 - Data retention and demo mode controls
+- Read-only for members (sync still available on Connectors tab)
+
+**User Management** (`/users` — Admin only)
+- Create, edit, block/unblock, and delete users
+- Assign users to projects with per-project access control
+- Regenerate passwords with one-time display
+- Two roles: Admin (full access) and Member (view + sync)
+- Login with email or username
+- Self-service: change own password and edit name via account settings
 
 ### Connectors
 
@@ -205,9 +217,9 @@ qod/
 | Backend | NestJS, Fastify, Prisma ORM, BullMQ |
 | Database | PostgreSQL 16 + TimescaleDB |
 | Cache/Queue | Redis 7 |
-| Auth | JWT (HS256), RBAC (Admin/Member/Viewer) |
+| Auth | JWT (HS256), RBAC (Admin/Member), per-project access control |
 | Real-time | WebSocket (Socket.IO) via NestJS gateway |
-| Testing | Vitest (550+ unit/integration tests), nock (HTTP mocking) |
+| Testing | Vitest (650+ unit tests), Playwright (125 E2E tests), nock (HTTP mocking) |
 
 ### System Diagram
 
@@ -239,6 +251,7 @@ See the [`docs/`](docs/) folder for additional documentation:
 - [Testing](docs/testing.md)
 - [WebSocket / Real-time](docs/websocket.md)
 - [Plugin Interface](docs/plugin-interface.md)
+- [User Management & RBAC](docs/user-management.md)
 - [Roadmap](docs/roadmap.md)
 
 ## License

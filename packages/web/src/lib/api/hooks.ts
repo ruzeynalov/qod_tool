@@ -8,7 +8,7 @@
 // When demo mode is ON, hooks use client-side generated data.
 // When demo mode is OFF, hooks use the API and show empty state on errors.
 
-import { useQuery, keepPreviousData } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { apiClient } from './client';
 import { useDemoMode } from '@/app/_providers/demo-mode-provider';
 import {
@@ -650,5 +650,107 @@ export function useTestExecutionHistory(projectId: string, testCaseId: string | 
     },
     enabled: !!projectId && !!testCaseId,
     staleTime: 30_000,
+  });
+}
+
+// ─── User Management ──────────────────────────────────────────────
+
+export function useUsers() {
+  return useQuery({
+    queryKey: ['users'],
+    queryFn: () => apiClient<any[]>('/api/v1/users'),
+    staleTime: 30_000,
+  });
+}
+
+export function useUserProjects(userId: string) {
+  return useQuery({
+    queryKey: ['users', userId, 'projects'],
+    queryFn: () => apiClient<any[]>(`/api/v1/users/${userId}/projects`),
+    enabled: !!userId,
+    staleTime: 30_000,
+  });
+}
+
+export function useCreateUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { email: string; username: string; name: string; role?: string; password?: string }) =>
+      apiClient<any>('/api/v1/users', { method: 'POST', body: JSON.stringify(data) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+}
+
+export function useUpdateUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...data }: { id: string; name?: string; username?: string; email?: string; role?: string }) =>
+      apiClient<any>(`/api/v1/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+}
+
+export function useDeleteUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiClient<any>(`/api/v1/users/${id}`, { method: 'DELETE' }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+}
+
+export function useBlockUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiClient<any>(`/api/v1/users/${id}/block`, { method: 'POST', body: '{}' }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+}
+
+export function useUnblockUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiClient<any>(`/api/v1/users/${id}/unblock`, { method: 'POST', body: '{}' }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+}
+
+export function useRegeneratePassword() {
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiClient<{ password: string }>(`/api/v1/users/${id}/regenerate-password`, { method: 'POST', body: '{}' }),
+  });
+}
+
+export function useChangePassword() {
+  return useMutation({
+    mutationFn: (data: { currentPassword: string; newPassword: string }) =>
+      apiClient<{ message: string }>('/api/v1/users/me/change-password', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  });
+}
+
+export function useSetUserProjectAccess() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ userId, projectId, role }: { userId: string; projectId: string; role: string }) =>
+      apiClient<any>(`/api/v1/users/${userId}/projects/${projectId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ role }),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+}
+
+export function useRemoveUserProjectAccess() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ userId, projectId }: { userId: string; projectId: string }) =>
+      apiClient<any>(`/api/v1/users/${userId}/projects/${projectId}`, { method: 'DELETE' }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
   });
 }

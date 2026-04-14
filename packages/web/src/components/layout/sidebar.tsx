@@ -13,18 +13,22 @@ import {
   ChevronLeft,
   ChevronRight,
   Layers,
+  Users,
 } from 'lucide-react';
+import { useAuth } from '@/app/_providers/auth-provider';
 import { cn } from '@/lib/utils/cn';
 
 interface NavItem {
   label: string;
   href: string;
   icon: React.ElementType;
+  adminOnly?: boolean;
 }
 
 const mainNav: NavItem[] = [
   { label: 'Overview', href: '/', icon: LayoutDashboard },
   { label: 'Projects', href: '/projects', icon: FolderKanban },
+  { label: 'Users', href: '/users', icon: Users, adminOnly: true },
 ];
 
 const projectSubNav: NavItem[] = [
@@ -42,6 +46,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
+  const { isAdmin } = useAuth();
   const pathname = usePathname() ?? '';
 
   // Detect if we're inside a project route
@@ -76,7 +81,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
             </span>
           )}
         </div>
-        {mainNav.map((item) => {
+        {mainNav.filter(item => !item.adminOnly || isAdmin).map((item) => {
           const isActive =
             item.href === '/'
               ? pathname === '/'

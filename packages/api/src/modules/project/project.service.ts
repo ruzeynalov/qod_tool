@@ -64,6 +64,29 @@ export class ProjectService {
     });
   }
 
+  async findAllForUser(orgId: string, userId: string) {
+    return this.prisma.project.findMany({
+      where: {
+        orgId,
+        deletedAt: null,
+        members: {
+          some: { userId },
+        },
+      },
+      include: {
+        _count: {
+          select: { members: true },
+        },
+      },
+    });
+  }
+
+  async isMember(projectId: string, userId: string) {
+    return this.prisma.projectMember.findUnique({
+      where: { projectId_userId: { projectId, userId } },
+    });
+  }
+
   async findById(id: string) {
     return this.prisma.project.findFirst({
       where: { id, deletedAt: null },

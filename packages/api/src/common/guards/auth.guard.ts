@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuthService } from '../../modules/auth/auth.service';
+import { PrismaService } from '../../database/prisma.service';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 
 @Injectable()
@@ -13,9 +14,10 @@ export class AuthGuard implements CanActivate {
   constructor(
     private readonly authService: AuthService,
     private readonly reflector: Reflector,
+    private readonly prisma: PrismaService,
   ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),
@@ -44,10 +46,22 @@ export class AuthGuard implements CanActivate {
       throw new UnauthorizedException('Invalid or expired token');
     }
 
+    // Fetch current user state from DB (role may have changed since token was issued)
+    const dbUser = await this.prisma.user.findUnique({
+      where: { id: payload.userId },
+      select: { blockedAt: true, role: true },
+    });
+    if (!dbUser) {
+      throw new UnauthorizedException('User not found');
+    }
+    if (dbUser.blockedAt) {
+      throw new UnauthorizedException('Account is blocked');
+    }
+
     request.user = {
       userId: payload.userId,
       email: payload.email,
-      role: payload.role,
+      role: dbUser.role, // Always use DB role, not stale JWT role
       orgId: payload.orgId,
     };
 

@@ -7,7 +7,9 @@ const PROJECT_ID = 'proj-uuid-1';
 function createMockProjectService() {
   return {
     findAll: vi.fn().mockResolvedValue([{ id: PROJECT_ID, name: 'My Project' }]),
+    findAllForUser: vi.fn().mockResolvedValue([{ id: PROJECT_ID, name: 'My Project' }]),
     findById: vi.fn().mockResolvedValue({ id: PROJECT_ID, name: 'My Project', orgId: ORG_ID }),
+    isMember: vi.fn().mockResolvedValue({ projectId: PROJECT_ID, userId: 'u1', role: 'MEMBER' }),
     create: vi.fn().mockResolvedValue({ id: PROJECT_ID, name: 'New Project' }),
     update: vi.fn().mockResolvedValue({ id: PROJECT_ID, name: 'Updated' }),
     delete: vi.fn().mockResolvedValue({ id: PROJECT_ID }),
@@ -30,10 +32,10 @@ describe('ProjectController', () => {
     expect(result).toHaveLength(1);
   });
 
-  it('findAll scopes non-admin users to their orgId', async () => {
-    const req = { user: { role: 'MEMBER', orgId: 'user-org' } };
+  it('findAll scopes non-admin users to their org and membership', async () => {
+    const req = { user: { role: 'MEMBER', orgId: 'user-org', userId: 'u1' } };
     await controller.findAll(ORG_ID, req);
-    expect(service.findAll).toHaveBeenCalledWith('user-org');
+    expect(service.findAllForUser).toHaveBeenCalledWith('user-org', 'u1');
   });
 
   it('findById passes id to service', async () => {

@@ -179,12 +179,12 @@ describe('ConnectorController', () => {
     ]);
   });
 
-  it('exportAll requires ADMIN or MANAGER role', () => {
+  it('exportAll requires ADMIN role', () => {
     const reflector = new Reflector();
     const roles = reflector.get<string[]>(
       ROLES_KEY,
       ConnectorController.prototype.exportAll,
     );
-    expect(roles).toEqual(['ADMIN', 'MANAGER']);
+    expect(roles).toEqual(['ADMIN']);
   });
 });

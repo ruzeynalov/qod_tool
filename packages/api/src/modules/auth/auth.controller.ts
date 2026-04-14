@@ -11,8 +11,9 @@ import { AuthService } from './auth.service';
 import { Public } from '../../common/decorators/public.decorator';
 
 export class LoginDto {
-  @IsEmail()
-  email: string;
+  @IsString()
+  @IsNotEmpty()
+  login: string; // email or username
 
   @IsString()
   @IsNotEmpty()
@@ -43,9 +44,9 @@ export class AuthController {
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('login')
   async login(@Body() dto: LoginDto) {
-    const user = await this.authService.validateUser(dto.email, dto.password);
+    const user = await this.authService.validateUser(dto.login, dto.password);
     if (!user) {
-      throw new UnauthorizedException('Invalid email or password');
+      throw new UnauthorizedException('Invalid credentials');
     }
 
     const { accessToken, refreshToken } = await this.authService.login(user);

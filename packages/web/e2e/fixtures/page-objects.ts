@@ -46,14 +46,14 @@ export class Header {
 // ─── Login Page ──────────────────────────────────────────────────────
 
 export class LoginPage {
-  readonly emailInput: Locator;
+  readonly loginInput: Locator;
   readonly passwordInput: Locator;
   readonly submitButton: Locator;
   readonly errorAlert: Locator;
   readonly heading: Locator;
 
   constructor(private page: Page) {
-    this.emailInput = page.locator('#email');
+    this.loginInput = page.locator('#login');
     this.passwordInput = page.locator('#password');
     this.submitButton = page.getByRole('button', { name: /sign in/i });
     // Next.js has a hidden route-announcer with role="alert"; target app error alerts by class
@@ -66,8 +66,8 @@ export class LoginPage {
     await this.heading.waitFor({ timeout: 15_000 });
   }
 
-  async login(email: string, password: string) {
-    await this.emailInput.fill(email);
+  async login(loginValue: string, password: string) {
+    await this.loginInput.fill(loginValue);
     await this.passwordInput.fill(password);
     await this.submitButton.click();
   }
@@ -132,5 +132,24 @@ export class ProjectDetailPage {
     const main = this.page.getByRole('main');
     const tabLink = main.getByRole('link', { name: label });
     await tabLink.click();
+  }
+}
+
+// ─── Users Page ─────────────────────────────────────────────────────
+
+export class UsersPage {
+  readonly heading: Locator;
+  readonly createButton: Locator;
+  readonly usersTable: Locator;
+
+  constructor(private page: Page) {
+    this.heading = page.getByRole('heading', { name: /user management/i });
+    this.createButton = page.getByRole('button', { name: /create user/i });
+    this.usersTable = page.locator('table');
+  }
+
+  async goto() {
+    await this.page.goto('/users');
+    await this.heading.waitFor({ timeout: 15_000 });
   }
 }

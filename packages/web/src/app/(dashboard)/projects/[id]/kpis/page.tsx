@@ -333,11 +333,14 @@ export default function KPIDashboardPage() {
   }
 
   if (error) {
+    const isAccessDenied = (error as Error)?.message?.toLowerCase().includes('access');
     return (
       <div className="flex h-80 items-center justify-center">
         <AlertTriangle className="h-5 w-5 text-rag-red" />
         <span className="ml-2 text-sm text-secondary">
-          Failed to load KPI data. Please try again.
+          {isAccessDenied
+            ? 'You do not have access to this project. Contact an administrator to request access.'
+            : 'Failed to load KPI data. Please try again.'}
         </span>
       </div>
     );
