@@ -11,6 +11,7 @@ import { useAuth } from '@/app/_providers/auth-provider';
 import { useProjects } from '@/lib/api/hooks';
 import { cn } from '@/lib/utils/cn';
 import { UserSettingsDialog } from './user-settings-dialog';
+import { NotificationBell } from './notification-bell';
 
 function useBreadcrumbs(pathname: string) {
   const { data: projects } = useProjects();
@@ -108,6 +109,9 @@ export function Header() {
             <div className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-transform ${demoMode ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
           </div>
         </button>
+
+        {/* Notification bell */}
+        <NotificationBell />
 
         {/* Skin switcher */}
         <div className="relative" ref={skinRef}>

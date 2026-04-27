@@ -81,6 +81,7 @@ model Project {
   kpiTargets       KPITarget[]
   alertRules       AlertRule[]
   auditLogs        AuditLog[]
+  notifications    Notification[]
 
   @@unique([orgId, slug])
   @@map("projects")
@@ -471,6 +472,7 @@ enum KPIMetric {
   EXEC_VELOCITY
   REQ_COVERAGE
   READINESS_SCORE
+  DEFECT_DENSITY
 }
 
 model KPISnapshot {
@@ -526,10 +528,12 @@ model AlertRule {
   channel       AlertChannel
   channelConfig Json           @default("{}") @map("channel_config")
   enabled       Boolean        @default(true)
+  inBreach      Boolean        @default(false) @map("in_breach")
   lastTriggered DateTime?      @map("last_triggered")
   createdAt     DateTime       @default(now()) @map("created_at")
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  notifications Notification[]
 
   @@map("alert_rules")
 }
@@ -553,17 +557,23 @@ model DashboardLayout {
 // ─── Notification ────────────────────────────────────────────
 
 model Notification {
-  id        String   @id @default(uuid()) @db.Uuid
-  userId    String   @map("user_id") @db.Uuid
-  title     String
-  body      String
-  link      String?
-  read      Boolean  @default(false)
-  createdAt DateTime @default(now()) @map("created_at")
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  projectId   String?  @map("project_id") @db.Uuid
+  alertRuleId String?  @map("alert_rule_id") @db.Uuid
+  title       String
+  body        String
+  link        String?
+  read        Boolean  @default(false)
+  muted       Boolean  @default(false)
+  createdAt   DateTime @default(now()) @map("created_at")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project   Project?   @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  alertRule AlertRule? @relation(fields: [alertRuleId], references: [id], onDelete: SetNull)
 
   @@index([userId, read, createdAt])
+  @@index([userId, projectId, createdAt])
   @@map("notifications")
 }
 

@@ -1,10 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { KPIMetric, AlertCondition, AlertChannel } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import { CreateAlertRuleDto } from './dto/create-alert-rule.dto';
 import { UpdateAlertRuleDto } from './dto/update-alert-rule.dto';
-
-const COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
 
 @Injectable()
 export class AlertService {
@@ -27,7 +25,11 @@ export class AlertService {
     });
   }
 
-  async updateAlertRule(id: string, dto: UpdateAlertRuleDto) {
+  async updateAlertRule(projectId: string, id: string, dto: UpdateAlertRuleDto) {
+    const rule = await this.prisma.alertRule.findFirst({ where: { id, projectId } });
+    if (!rule) {
+      throw new NotFoundException('Alert rule not found');
+    }
     return this.prisma.alertRule.update({
       where: { id },
       data: {
@@ -41,7 +43,11 @@ export class AlertService {
     });
   }
 
-  async deleteAlertRule(id: string) {
+  async deleteAlertRule(projectId: string, id: string) {
+    const rule = await this.prisma.alertRule.findFirst({ where: { id, projectId } });
+    if (!rule) {
+      throw new NotFoundException('Alert rule not found');
+    }
     return this.prisma.alertRule.delete({ where: { id } });
   }
 
@@ -59,14 +65,6 @@ export class AlertService {
     });
 
     for (const rule of rules) {
-      // Cooldown check
-      if (rule.lastTriggered) {
-        const elapsed = Date.now() - new Date(rule.lastTriggered).getTime();
-        if (elapsed < COOLDOWN_MS) {
-          continue;
-        }
-      }
-
       // Fetch latest snapshot(s) for this rule's metric
       const snapshots = await this.prisma.kPISnapshot.findMany({
         where: { projectId, metric: rule.metric as KPIMetric },
@@ -86,7 +84,20 @@ export class AlertService {
         snapshots,
       );
 
+      // State-based dedup: only fire on transition from clear → breach.
+      // While the rule stays in breach, it stays silent. When the metric
+      // recovers, inBreach is cleared so a future breach can re-fire.
       if (!shouldTrigger) {
+        if (rule.inBreach) {
+          await this.prisma.alertRule.update({
+            where: { id: rule.id },
+            data: { inBreach: false },
+          });
+        }
+        continue;
+      }
+
+      if (rule.inBreach) {
         continue;
       }
 
@@ -104,10 +115,9 @@ export class AlertService {
           break;
       }
 
-      // Update lastTriggered
       await this.prisma.alertRule.update({
         where: { id: rule.id },
-        data: { lastTriggered: new Date() },
+        data: { inBreach: true, lastTriggered: new Date() },
       });
     }
   }
@@ -143,16 +153,35 @@ export class AlertService {
     value: number,
     projectId: string,
   ): Promise<void> {
-    const members = await this.prisma.projectMember.findMany({
-      where: { projectId },
-      select: { userId: true },
-    });
+    // Recipients: explicit ProjectMember rows + all ADMIN users (admins
+    // implicitly have access to every project, so they should also be
+    // alerted). Deduplicated so an admin who is also a member only gets
+    // one notification.
+    const [members, admins] = await Promise.all([
+      this.prisma.projectMember.findMany({
+        where: { projectId },
+        select: { userId: true },
+      }),
+      this.prisma.user.findMany({
+        where: { role: 'ADMIN' },
+        select: { id: true },
+      }),
+    ]);
+
+    const recipientIds = new Set<string>([
+      ...members.map((m) => m.userId),
+      ...admins.map((a) => a.id),
+    ]);
+
+    if (recipientIds.size === 0) return;
 
     await this.prisma.$transaction(
-      members.map((member) =>
+      Array.from(recipientIds).map((userId) =>
         this.prisma.notification.create({
           data: {
-            userId: member.userId,
+            userId,
+            projectId,
+            alertRuleId: rule.id,
             title: `Alert: ${metric} threshold breached`,
             body: `${metric} is ${value}, which breaches the ${rule.condition} ${rule.threshold} threshold.`,
           },

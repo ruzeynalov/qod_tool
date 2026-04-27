@@ -11,6 +11,7 @@
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { apiClient } from './client';
 import { useDemoMode } from '@/app/_providers/demo-mode-provider';
+import { getDemoAlertRules, type AlertRule } from '@/lib/demo/demo-alerts';
 import {
   getDemoProjects,
   getDemoKPIDashboard,
@@ -752,5 +753,222 @@ export function useRemoveUserProjectAccess() {
     mutationFn: ({ userId, projectId }: { userId: string; projectId: string }) =>
       apiClient<any>(`/api/v1/users/${userId}/projects/${projectId}`, { method: 'DELETE' }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+}
+
+// ─── Alert Rules ─────────────────────────────────────────────────────
+
+export function useAlertRules(projectId: string) {
+  const { demoMode } = useDemoMode();
+  return useQuery<AlertRule[]>({
+    queryKey: ['alert-rules', projectId, { demoMode }],
+    queryFn: async () => {
+      if (demoMode) return getDemoAlertRules(projectId);
+      return apiClient<AlertRule[]>(`/api/v1/projects/${projectId}/alerts`);
+    },
+    enabled: !!projectId,
+    staleTime: 30_000,
+  });
+}
+
+export function useCreateAlertRule(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { metric: string; condition: string; threshold: number; channel: string; channelConfig?: Record<string, any> }) =>
+      apiClient<AlertRule>(`/api/v1/projects/${projectId}/alerts`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['alert-rules', projectId] }),
+  });
+}
+
+export function useUpdateAlertRule(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...data }: { id: string; metric?: string; condition?: string; threshold?: number; channel?: string; channelConfig?: Record<string, any>; enabled?: boolean }) =>
+      apiClient<AlertRule>(`/api/v1/projects/${projectId}/alerts/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['alert-rules', projectId] }),
+  });
+}
+
+export function useDeleteAlertRule(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiClient<any>(`/api/v1/projects/${projectId}/alerts/${id}`, { method: 'DELETE' }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['alert-rules', projectId] }),
+  });
+}
+
+// ─── Notifications ───────────────────────────────────────────────────
+
+export interface Notification {
+  id: string;
+  userId: string;
+  projectId?: string | null;
+  alertRuleId?: string | null;
+  title: string;
+  body: string;
+  link: string | null;
+  read: boolean;
+  muted: boolean;
+  createdAt: string;
+  project?: { id: string; name: string } | null;
+  alertRule?: { id: string; metric: string; condition: string; threshold: number; enabled: boolean } | null;
+}
+
+export interface NotificationLogPage {
+  items: Notification[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+function getDemoNotifications(): Notification[] {
+  return [
+    {
+      id: 'demo-notif-1',
+      userId: 'demo-user',
+      title: 'Alert: COVERAGE_PCT threshold breached',
+      body: 'COVERAGE_PCT is 72.5, which breaches the LESS_THAN 80 threshold.',
+      link: null,
+      read: false,
+      muted: false,
+      createdAt: new Date(Date.now() - 1800000).toISOString(),
+    },
+    {
+      id: 'demo-notif-2',
+      userId: 'demo-user',
+      title: 'Alert: FLAKY_RATE threshold breached',
+      body: 'FLAKY_RATE is 12.3, which breaches the GREATER_THAN 10 threshold.',
+      link: null,
+      read: false,
+      muted: false,
+      createdAt: new Date(Date.now() - 3600000).toISOString(),
+    },
+    {
+      id: 'demo-notif-3',
+      userId: 'demo-user',
+      title: 'Alert: PASS_RATE_7D threshold breached',
+      body: 'PASS_RATE_7D is 85.2, which breaches the LESS_THAN 90 threshold.',
+      link: null,
+      read: true,
+      muted: false,
+      createdAt: new Date(Date.now() - 86400000).toISOString(),
+    },
+  ];
+}
+
+export function useNotifications() {
+  const { demoMode } = useDemoMode();
+  return useQuery<Notification[]>({
+    queryKey: ['notifications', { demoMode }],
+    queryFn: async () => {
+      if (demoMode) return getDemoNotifications();
+      return apiClient<Notification[]>('/api/v1/notifications');
+    },
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useUnreadNotificationCount() {
+  const { demoMode } = useDemoMode();
+  return useQuery<{ count: number }>({
+    queryKey: ['notification-unread-count', { demoMode }],
+    queryFn: async () => {
+      if (demoMode) return { count: getDemoNotifications().filter(n => !n.read).length };
+      return apiClient<{ count: number }>('/api/v1/notifications/unread-count');
+    },
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useMarkNotificationRead() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiClient<any>(`/api/v1/notifications/${id}/read`, { method: 'PATCH' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      queryClient.invalidateQueries({ queryKey: ['notification-unread-count'] });
+      queryClient.invalidateQueries({ queryKey: ['notification-log'] });
+    },
+  });
+}
+
+export function useMarkAllNotificationsRead() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiClient<any>('/api/v1/notifications/read-all', { method: 'POST' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      queryClient.invalidateQueries({ queryKey: ['notification-unread-count'] });
+      queryClient.invalidateQueries({ queryKey: ['notification-log'] });
+    },
+  });
+}
+
+interface NotificationLogFilters {
+  page: number;
+  pageSize: number;
+  search: string;
+  projectId?: string;
+  metrics?: string[];
+}
+
+export function useNotificationLog(filters: NotificationLogFilters) {
+  const { demoMode } = useDemoMode();
+  return useQuery<NotificationLogPage>({
+    queryKey: ['notification-log', filters, { demoMode }],
+    queryFn: async () => {
+      if (demoMode) {
+        const all = getDemoNotifications();
+        return { items: all, total: all.length, page: 1, pageSize: all.length };
+      }
+      const params = new URLSearchParams();
+      params.set('page', String(filters.page));
+      params.set('pageSize', String(filters.pageSize));
+      if (filters.search) params.set('search', filters.search);
+      if (filters.projectId) params.set('projectId', filters.projectId);
+      if (filters.metrics && filters.metrics.length > 0) {
+        params.set('metrics', filters.metrics.join(','));
+      }
+      return apiClient<NotificationLogPage>(`/api/v1/notifications/log?${params.toString()}`);
+    },
+    staleTime: 0,
+    refetchOnMount: 'always',
+  });
+}
+
+export function useMuteAlertFromNotification() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiClient<any>(`/api/v1/notifications/${id}/mute`, { method: 'POST' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notification-log'] });
+      queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      queryClient.invalidateQueries({ queryKey: ['notification-unread-count'] });
+    },
+  });
+}
+
+export function useUnmuteAlertFromNotification() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiClient<any>(`/api/v1/notifications/${id}/unmute`, { method: 'POST' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notification-log'] });
+      queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      queryClient.invalidateQueries({ queryKey: ['notification-unread-count'] });
+    },
   });
 }

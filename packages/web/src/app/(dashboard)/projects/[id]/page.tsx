@@ -315,28 +315,18 @@ export default function ProjectOverviewPage() {
     'PASS_RATE_7D',
   ];
   const displayKpis = useMemo(() => {
+    // DEFECT_DENSITY now comes from the backend KPI snapshot (authoritative
+    // source used by the alert engine). The previous client-side computation
+    // was removed to avoid a duplicate card.
     const filtered = kpis.filter((k) => k.metric !== 'EXEC_VELOCITY' && k.metric !== 'MTTD_HOURS');
-    if (totalTestCases > 0) {
-      const density = (openDefectCount / totalTestCases) * 100;
-      const ragStatus = density <= 2 ? 'GREEN' : density <= 5 ? 'AMBER' : 'RED';
-      filtered.push({
-        metric: 'DEFECT_DENSITY',
-        latestValue: density,
-        hasData: true,
-        target: null as any,
-        ragStatus,
-        sparkline: [],
-        trend: 'FLAT',
-      });
-    }
     // Sort by explicit order to ensure both demo and real modes show the same card arrangement
     const orderMap = new Map(OVERVIEW_KPI_ORDER.map((m, i) => [m, i]));
-    return filtered.sort((a, b) => {
+    return filtered.slice().sort((a, b) => {
       const ia = orderMap.get(a.metric) ?? 999;
       const ib = orderMap.get(b.metric) ?? 999;
       return ia - ib;
     });
-  }, [kpis, totalTestCases, openDefectCount]);
+  }, [kpis]);
 
   const passRate = kpis.find((k) => k.metric === 'PASS_RATE_7D');
   const coverage = kpis.find((k) => k.metric === 'COVERAGE_PCT');

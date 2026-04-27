@@ -24,10 +24,12 @@
     "docker:ps": "docker compose -f deploy/docker-compose/docker-compose.yml ps"
   },
   "devDependencies": {
+    "@swc/core": "^1.15.26",
     "@typescript-eslint/eslint-plugin": "^8.56.1",
     "@typescript-eslint/parser": "^8.56.1",
     "eslint": "^9.39.4",
     "turbo": "^2.3.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "unplugin-swc": "^1.5.9"
   }
 }

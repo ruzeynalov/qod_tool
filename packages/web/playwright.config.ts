@@ -13,7 +13,7 @@ export default defineConfig({
   expect: { timeout: 10_000 },
 
   use: {
-    baseURL: `http://localhost:${process.env.QOD_TEST_PORT ?? '3002'}`,
+    baseURL: `http://127.0.0.1:${process.env.QOD_TEST_PORT ?? '3002'}`,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'on-first-retry',
@@ -35,8 +35,8 @@ export default defineConfig({
   ],
 
   webServer: {
-    command: `npx next dev --port ${process.env.QOD_TEST_PORT ?? '3002'}`,
-    url: `http://localhost:${process.env.QOD_TEST_PORT ?? '3002'}`,
+    command: `npx next dev --hostname 127.0.0.1 --port ${process.env.QOD_TEST_PORT ?? '3002'}`,
+    url: `http://127.0.0.1:${process.env.QOD_TEST_PORT ?? '3002'}`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },
