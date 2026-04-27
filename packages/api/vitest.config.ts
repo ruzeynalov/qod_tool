@@ -1,7 +1,9 @@
 import { defineConfig } from 'vitest/config';
+import swc from 'unplugin-swc';
 import path from 'path';
 
 export default defineConfig({
+  plugins: [swc.vite({ tsconfigFile: './tsconfig.json' })],
   test: {
     globals: true,
     root: '.',

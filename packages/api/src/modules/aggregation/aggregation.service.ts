@@ -247,6 +247,26 @@ export class AggregationService {
     return (covered / stories.length) * 100;
   }
 
+  async computeDefectDensity(projectId: string): Promise<number> {
+    // Open defects per 100 test cases (matches the overview card: % of test
+    // cases covered by an open defect).
+    const [openDefects, totalTestCases] = await Promise.all([
+      this.prisma.defect.count({
+        where: {
+          projectId,
+          deletedAt: null,
+          status: { in: ['OPEN', 'IN_PROGRESS', 'REOPENED'] },
+        },
+      }),
+      this.prisma.testCase.count({
+        where: { projectId, deletedAt: null },
+      }),
+    ]);
+
+    if (totalTestCases === 0) return 0;
+    return (openDefects / totalTestCases) * 100;
+  }
+
   async computeReadinessScore(projectId: string): Promise<number> {
     const passRate = await this.computePassRate(projectId, 7);
     const coveragePct = await this.computeCoveragePct(projectId);
@@ -285,6 +305,7 @@ export class AggregationService {
       execVelocity,
       reqCoverage,
       readinessScore,
+      defectDensity,
     ] = await Promise.all([
       this.computeCoveragePct(projectId),
       this.computePassRate(projectId, 7),
@@ -296,6 +317,7 @@ export class AggregationService {
       this.computeExecVelocity(projectId, 7),
       this.computeReqCoverage(projectId),
       this.computeReadinessScore(projectId),
+      this.computeDefectDensity(projectId),
     ]);
 
     const now = new Date();
@@ -312,6 +334,7 @@ export class AggregationService {
         { projectId, metric: 'EXEC_VELOCITY' as any, value: execVelocity, recordedAt: now },
         { projectId, metric: 'REQ_COVERAGE' as any, value: reqCoverage, recordedAt: now },
         { projectId, metric: 'READINESS_SCORE' as any, value: readinessScore, recordedAt: now },
+        { projectId, metric: 'DEFECT_DENSITY' as any, value: defectDensity, recordedAt: now },
       ],
     });
   }

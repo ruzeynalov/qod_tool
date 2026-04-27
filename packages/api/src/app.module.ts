@@ -13,6 +13,7 @@ import { AggregationModule } from './modules/aggregation/aggregation.module';
 import { SyncModule } from './modules/sync/sync.module';
 import { WebhookModule } from './modules/webhook/webhook.module';
 import { AlertModule } from './modules/alert/alert.module';
+import { NotificationModule } from './modules/notification/notification.module';
 import { LiveModule } from './modules/live/live.module';
 import { ExportModule } from './modules/export/export.module';
 import { DataModule } from './modules/data/data.module';
@@ -36,6 +37,7 @@ import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor
     SyncModule,
     WebhookModule,
     AlertModule,
+    NotificationModule,
     LiveModule,
     ExportModule,
     DataModule,

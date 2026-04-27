@@ -11,8 +11,11 @@ describe('AlertService', () => {
   beforeEach(() => {
     prisma = createPrismaMock();
     service = new AlertService(prisma as unknown as PrismaService);
-    // Reset global fetch mock
+    // Reset global fetch mock first — it clears mockResolvedValue defaults.
     vi.restoreAllMocks();
+    // Default: no ADMIN users. Individual tests can override to cover
+    // the admin-recipient branch of dispatchInApp.
+    prisma.user.findMany.mockResolvedValue([]);
   });
 
   // ─── CRUD ──────────────────────────────────────────────────
@@ -46,9 +49,10 @@ describe('AlertService', () => {
   });
 
   describe('updateAlertRule()', () => {
-    it('should update an existing alert rule', async () => {
+    it('should verify ownership then update an existing alert rule', async () => {
       const id = 'rule-1';
       const dto = { threshold: 75, enabled: false };
+      const existing = { id, projectId, metric: 'COVERAGE_PCT' };
       const updated = {
         id,
         projectId,
@@ -62,29 +66,49 @@ describe('AlertService', () => {
         createdAt: new Date(),
       };
 
+      prisma.alertRule.findFirst.mockResolvedValue(existing);
       prisma.alertRule.update.mockResolvedValue(updated);
 
-      const result = await service.updateAlertRule(id, dto as any);
+      const result = await service.updateAlertRule(projectId, id, dto as any);
 
+      expect(prisma.alertRule.findFirst).toHaveBeenCalledWith({ where: { id, projectId } });
       expect(prisma.alertRule.update).toHaveBeenCalledWith({
         where: { id },
         data: expect.objectContaining({ threshold: 75, enabled: false }),
       });
       expect(result).toEqual(updated);
     });
+
+    it('should throw NotFoundException when alert does not belong to the project', async () => {
+      prisma.alertRule.findFirst.mockResolvedValue(null);
+
+      await expect(service.updateAlertRule(projectId, 'rule-1', { threshold: 50 } as any))
+        .rejects.toThrow('Alert rule not found');
+      expect(prisma.alertRule.update).not.toHaveBeenCalled();
+    });
   });
 
   describe('deleteAlertRule()', () => {
-    it('should delete an alert rule', async () => {
+    it('should verify ownership then delete an alert rule', async () => {
       const id = 'rule-1';
-      const deleted = { id, projectId, metric: 'COVERAGE_PCT' };
+      const existing = { id, projectId, metric: 'COVERAGE_PCT' };
 
-      prisma.alertRule.delete.mockResolvedValue(deleted);
+      prisma.alertRule.findFirst.mockResolvedValue(existing);
+      prisma.alertRule.delete.mockResolvedValue(existing);
 
-      const result = await service.deleteAlertRule(id);
+      const result = await service.deleteAlertRule(projectId, id);
 
+      expect(prisma.alertRule.findFirst).toHaveBeenCalledWith({ where: { id, projectId } });
       expect(prisma.alertRule.delete).toHaveBeenCalledWith({ where: { id } });
-      expect(result).toEqual(deleted);
+      expect(result).toEqual(existing);
+    });
+
+    it('should throw NotFoundException when alert does not belong to the project', async () => {
+      prisma.alertRule.findFirst.mockResolvedValue(null);
+
+      await expect(service.deleteAlertRule(projectId, 'rule-1'))
+        .rejects.toThrow('Alert rule not found');
+      expect(prisma.alertRule.delete).not.toHaveBeenCalled();
     });
   });
 
@@ -118,6 +142,7 @@ describe('AlertService', () => {
       channel: 'IN_APP',
       channelConfig: {},
       enabled: true,
+      inBreach: false,
       lastTriggered: null,
       createdAt: new Date(),
       ...overrides,
@@ -173,7 +198,7 @@ describe('AlertService', () => {
       // Should update lastTriggered
       expect(prisma.alertRule.update).toHaveBeenCalledWith({
         where: { id: 'rule-1' },
-        data: { lastTriggered: expect.any(Date) },
+        data: { inBreach: true, lastTriggered: expect.any(Date) },
       });
     });
 
@@ -198,7 +223,7 @@ describe('AlertService', () => {
 
       expect(prisma.alertRule.update).toHaveBeenCalledWith({
         where: { id: 'rule-1' },
-        data: { lastTriggered: expect.any(Date) },
+        data: { inBreach: true, lastTriggered: expect.any(Date) },
       });
     });
 
@@ -242,7 +267,7 @@ describe('AlertService', () => {
 
       expect(prisma.alertRule.update).toHaveBeenCalledWith({
         where: { id: 'rule-1' },
-        data: { lastTriggered: expect.any(Date) },
+        data: { inBreach: true, lastTriggered: expect.any(Date) },
       });
     });
 
@@ -310,6 +335,40 @@ describe('AlertService', () => {
           body: expect.any(String),
         }),
       });
+    });
+
+    it('should create IN_APP notifications for ADMIN users in addition to project members, deduplicated', async () => {
+      const rule = makeRule({ channel: 'IN_APP' });
+      const snapshot = makeSnapshot({ value: 75 });
+
+      prisma.alertRule.findMany.mockResolvedValue([rule]);
+      prisma.kPISnapshot.findMany.mockResolvedValue([snapshot]);
+      // member-1 is also an admin — must receive exactly one notification
+      prisma.projectMember.findMany.mockResolvedValue([
+        { userId: 'member-1' },
+        { userId: 'member-2' },
+      ]);
+      prisma.user.findMany.mockResolvedValue([
+        { id: 'member-1' },
+        { id: 'admin-only' },
+      ]);
+      prisma.notification.create.mockResolvedValue({});
+      prisma.alertRule.update.mockResolvedValue({});
+
+      await service.evaluateAlerts(projectId);
+
+      expect(prisma.user.findMany).toHaveBeenCalledWith({
+        where: { role: 'ADMIN' },
+        select: { id: true },
+      });
+      // 3 unique recipients: member-1, member-2, admin-only
+      expect(prisma.notification.create).toHaveBeenCalledTimes(3);
+      const calledUserIds = prisma.notification.create.mock.calls.map(
+        (c: any[]) => c[0].data.userId,
+      );
+      expect(new Set(calledUserIds)).toEqual(
+        new Set(['member-1', 'member-2', 'admin-only']),
+      );
     });
 
     it('should dispatch to Slack webhook for SLACK channel', async () => {
@@ -383,13 +442,12 @@ describe('AlertService', () => {
       expect(triggered.getTime()).toBeLessThanOrEqual(after.getTime());
     });
 
-    // ─── Cooldown ─────────────────────────────────────────────
+    // ─── State-based dedup (inBreach) ─────────────────────────
 
-    it('should not re-trigger if lastTriggered is within 1 hour (cooldown)', async () => {
-      const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+    it('should not re-fire while inBreach is true even if condition still matches', async () => {
       const rule = makeRule({
         channel: 'IN_APP',
-        lastTriggered: thirtyMinutesAgo,
+        inBreach: true,
       });
       const snapshot = makeSnapshot({ value: 75 });
 
@@ -398,16 +456,39 @@ describe('AlertService', () => {
 
       await service.evaluateAlerts(projectId);
 
-      // Should NOT trigger due to cooldown
       expect(prisma.alertRule.update).not.toHaveBeenCalled();
       expect(prisma.notification.create).not.toHaveBeenCalled();
     });
 
-    it('should re-trigger if lastTriggered is older than 1 hour', async () => {
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    it('should clear inBreach when condition no longer matches', async () => {
       const rule = makeRule({
         channel: 'IN_APP',
-        lastTriggered: twoHoursAgo,
+        inBreach: true,
+        condition: 'LESS_THAN',
+        threshold: 80,
+      });
+      // value above threshold → condition cleared
+      const snapshot = makeSnapshot({ value: 95 });
+
+      prisma.alertRule.findMany.mockResolvedValue([rule]);
+      prisma.kPISnapshot.findMany.mockResolvedValue([snapshot]);
+      prisma.alertRule.update.mockResolvedValue({});
+
+      await service.evaluateAlerts(projectId);
+
+      expect(prisma.alertRule.update).toHaveBeenCalledWith({
+        where: { id: 'rule-1' },
+        data: { inBreach: false },
+      });
+      expect(prisma.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('should re-fire after the rule clears and breaches again', async () => {
+      const rule = makeRule({
+        channel: 'IN_APP',
+        inBreach: false,
+        condition: 'LESS_THAN',
+        threshold: 80,
       });
       const snapshot = makeSnapshot({ value: 75 });
 
@@ -419,7 +500,11 @@ describe('AlertService', () => {
 
       await service.evaluateAlerts(projectId);
 
-      expect(prisma.alertRule.update).toHaveBeenCalled();
+      expect(prisma.notification.create).toHaveBeenCalled();
+      expect(prisma.alertRule.update).toHaveBeenCalledWith({
+        where: { id: 'rule-1' },
+        data: expect.objectContaining({ inBreach: true }),
+      });
     });
 
     it('should skip evaluation when no snapshot exists for the metric', async () => {

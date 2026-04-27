@@ -7,8 +7,10 @@ export async function apiClient<T>(
   path: string,
   options?: RequestInit,
 ): Promise<T> {
+  // Fastify rejects requests with Content-Type: application/json and an
+  // empty body, so only set the header when a body is actually sent.
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(options?.body != null ? { 'Content-Type': 'application/json' } : {}),
     ...(options?.headers as Record<string, string>),
   };
 

@@ -3,7 +3,7 @@ import { IsString, IsNumber, IsOptional, IsObject, IsIn, IsBoolean } from 'class
 const METRICS = [
   'COVERAGE_PCT', 'PASS_RATE_7D', 'PASS_RATE_30D', 'FLAKY_RATE',
   'MTTD_HOURS', 'MTTR_HOURS', 'ESCAPE_RATE', 'EXEC_VELOCITY',
-  'REQ_COVERAGE', 'READINESS_SCORE',
+  'REQ_COVERAGE', 'READINESS_SCORE', 'DEFECT_DENSITY',
 ];
 
 const CONDITIONS = ['LESS_THAN', 'GREATER_THAN', 'DELTA_PCT'];

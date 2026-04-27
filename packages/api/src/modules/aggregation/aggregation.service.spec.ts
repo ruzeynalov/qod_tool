@@ -52,6 +52,36 @@ describe('AggregationService', () => {
     });
   });
 
+  describe('computeDefectDensity()', () => {
+    it('should compute open defects per 100 test cases', async () => {
+      prisma.defect.count.mockResolvedValueOnce(4);
+      prisma.testCase.count.mockResolvedValueOnce(80);
+
+      const result = await service.computeDefectDensity(projectId);
+
+      expect(prisma.defect.count).toHaveBeenCalledWith({
+        where: {
+          projectId,
+          deletedAt: null,
+          status: { in: ['OPEN', 'IN_PROGRESS', 'REOPENED'] },
+        },
+      });
+      expect(prisma.testCase.count).toHaveBeenCalledWith({
+        where: { projectId, deletedAt: null },
+      });
+      expect(result).toBe(5);
+    });
+
+    it('should return 0 when there are no test cases', async () => {
+      prisma.defect.count.mockResolvedValueOnce(4);
+      prisma.testCase.count.mockResolvedValueOnce(0);
+
+      const result = await service.computeDefectDensity(projectId);
+
+      expect(result).toBe(0);
+    });
+  });
+
   describe('computePassRate()', () => {
     it('should compute pass rate over last N days from TestResult counts', async () => {
       prisma.testResult.count
@@ -473,14 +503,14 @@ describe('AggregationService', () => {
       prisma.testRun.count.mockResolvedValue(70);
 
       // createMany for snapshots
-      prisma.kPISnapshot.createMany.mockResolvedValue({ count: 10 });
+      prisma.kPISnapshot.createMany.mockResolvedValue({ count: 11 });
 
       await service.runAggregation(projectId);
 
       expect(prisma.kPISnapshot.createMany).toHaveBeenCalledTimes(1);
       const createManyCall = prisma.kPISnapshot.createMany.mock.calls[0][0];
       expect(createManyCall.data).toBeInstanceOf(Array);
-      expect(createManyCall.data.length).toBe(10); // 10 KPI metrics
+      expect(createManyCall.data.length).toBe(11); // 11 KPI metrics
 
       // Verify metrics are present
       const metrics = createManyCall.data.map((d: any) => d.metric);
@@ -494,6 +524,7 @@ describe('AggregationService', () => {
       expect(metrics).toContain('EXEC_VELOCITY');
       expect(metrics).toContain('REQ_COVERAGE');
       expect(metrics).toContain('READINESS_SCORE');
+      expect(metrics).toContain('DEFECT_DENSITY');
 
       // Verify all records have the correct projectId
       for (const record of createManyCall.data) {

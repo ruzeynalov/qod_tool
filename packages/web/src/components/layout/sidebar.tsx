@@ -8,6 +8,7 @@ import {
   TestTube2,
   Bug,
   BarChart3,
+  Bell,
   Settings,
   Shield,
   ChevronLeft,
@@ -37,6 +38,7 @@ const projectSubNav: NavItem[] = [
   { label: 'Runs', href: '/runs', icon: TestTube2 },
   { label: 'Defects', href: '/defects', icon: Bug },
   { label: 'KPIs', href: '/kpis', icon: BarChart3 },
+  { label: 'Alerts', href: '/alerts', icon: Bell },
   { label: 'Settings', href: '/settings', icon: Settings },
 ];
 

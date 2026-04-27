@@ -220,12 +220,8 @@ export default function OverviewPage() {
       return { metric, latestValue: avg, ragStatus: worstRag, trend: dominantTrend };
     });
 
-    // Add Defect Density: open defects per 100 test cases (lower is better)
-    if (totalTestCases > 0) {
-      const density = (totalDefects / totalTestCases) * 100;
-      const densityRag = density <= 2 ? 'GREEN' : density <= 5 ? 'AMBER' : 'RED';
-      result.push({ metric: 'DEFECT_DENSITY', latestValue: density, ragStatus: densityRag, trend: 'FLAT' });
-    }
+    // DEFECT_DENSITY now comes from the backend KPI snapshot per project
+    // and is rolled up above like any other metric — no client-side push.
 
     // Enforce consistent ordering
     const ROLLUP_ORDER = ['COVERAGE_PCT', 'PASS_RATE_30D', 'FLAKY_RATE', 'MTTR_HOURS', 'ESCAPE_RATE', 'REQ_COVERAGE', 'READINESS_SCORE', 'DEFECT_DENSITY', 'PASS_RATE_7D'];
@@ -233,7 +229,7 @@ export default function OverviewPage() {
     result.sort((a, b) => (orderMap.get(a.metric) ?? 999) - (orderMap.get(b.metric) ?? 999));
 
     return result;
-  }, [allKPIs, totalDefects, totalTestCases]);
+  }, [allKPIs]);
 
   const avgPassRate = useMemo(() => {
     const rates = allKPIs.filter((k) => k.metric === 'PASS_RATE_7D').map((k) => k.latestValue);
