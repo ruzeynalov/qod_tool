@@ -1,9 +1,13 @@
 import { Module } from '@nestjs/common';
-import { KPIService } from './kpi.service';
+import { AggregationModule } from '../aggregation/aggregation.module';
 import { KPIController } from './kpi.controller';
+import { KPIFormulaConfigModule } from './kpi-formula-config.module';
+import { KPIFormulaController } from './kpi-formula.controller';
+import { KPIService } from './kpi.service';
 
 @Module({
-  controllers: [KPIController],
+  imports: [KPIFormulaConfigModule, AggregationModule],
+  controllers: [KPIController, KPIFormulaController],
   providers: [KPIService],
   exports: [KPIService],
 })

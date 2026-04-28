@@ -1,5 +1,7 @@
+import { vi } from 'vitest';
 import { createPrismaMock, PrismaMock } from '../../common/utils/prisma-mock';
 import { KPIService } from './kpi.service';
+import { KPIFormulaService } from './kpi-formula.service';
 import { PrismaService } from '../../database/prisma.service';
 
 describe('KPIService', () => {
@@ -8,9 +10,13 @@ describe('KPIService', () => {
 
   const projectId = 'proj-uuid-1';
 
+  const formulaServiceStub = {
+    getFormulaChangePoints: vi.fn().mockResolvedValue({}),
+  } as unknown as KPIFormulaService;
+
   beforeEach(() => {
     prisma = createPrismaMock();
-    service = new KPIService(prisma as unknown as PrismaService);
+    service = new KPIService(prisma as unknown as PrismaService, formulaServiceStub);
   });
 
   describe('getLatestSnapshots()', () => {

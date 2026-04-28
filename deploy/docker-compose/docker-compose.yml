@@ -83,6 +83,22 @@ services:
     networks:
       - backend
 
+  # Populate demo projects with realistic test data + 30 days of KPI history
+  # (idempotent — skips a project if it already has demo-seeded test cases).
+  demo-seed:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile.api
+    command: ['node', 'dist/database/seeds/demo-seed.js']
+    environment:
+      DATABASE_URL: postgresql://qod:${POSTGRES_PASSWORD:-qod_dev_password}@postgres:5432/qod
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    restart: 'no'
+    networks:
+      - backend
+
   api:
     build:
       context: ../../
@@ -103,7 +119,7 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
       PORT: '4000'
     depends_on:
-      seed:
+      demo-seed:
         condition: service_completed_successfully
       redis:
         condition: service_healthy

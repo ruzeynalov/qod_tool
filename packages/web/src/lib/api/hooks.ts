@@ -51,7 +51,16 @@ import type {
   DemoDefect,
   DemoPipelineRun,
   DemoStory,
+  FormulaDefinition,
+  FormulaParameters,
+  FormulaPreviewResult,
+  KPIMetricKey,
+  ResolvedFormulaConfig,
 } from '@qod/shared';
+import {
+  getDemoFormulaConfigs,
+  previewDemoFormula,
+} from '@/lib/demo/demo-data-provider';
 
 const EMPTY_PAGINATED = { items: [], total: 0, page: 1, pageSize: 20, totalPages: 0 };
 
@@ -969,6 +978,97 @@ export function useUnmuteAlertFromNotification() {
       queryClient.invalidateQueries({ queryKey: ['notification-log'] });
       queryClient.invalidateQueries({ queryKey: ['notifications'] });
       queryClient.invalidateQueries({ queryKey: ['notification-unread-count'] });
+    },
+  });
+}
+
+// ── KPI Formula Configurator ────────────────────────────────────────
+
+export interface KPIFormulaListResponse {
+  definitions: FormulaDefinition[];
+  configs: ResolvedFormulaConfig[];
+}
+
+export function useKPIFormulas(projectId: string) {
+  const { demoMode } = useDemoMode();
+  return useQuery<KPIFormulaListResponse>({
+    queryKey: ['kpi-formulas', projectId, { demoMode }],
+    queryFn: async () => {
+      if (demoMode) return getDemoFormulaConfigs();
+      return apiClient<KPIFormulaListResponse>(
+        `/api/v1/projects/${projectId}/kpis/formulas`,
+      );
+    },
+    enabled: !!projectId,
+    staleTime: 30_000,
+  });
+}
+
+export function useUpsertKPIFormula(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      metric,
+      parameters,
+      expression,
+    }: {
+      metric: KPIMetricKey;
+      parameters: FormulaParameters;
+      expression: string | null;
+    }) => {
+      return apiClient<ResolvedFormulaConfig>(
+        `/api/v1/projects/${projectId}/kpis/formulas/${metric}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ parameters, expression }),
+        },
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['kpi-formulas', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['kpi-dashboard', projectId] });
+    },
+  });
+}
+
+export function useResetKPIFormula(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (metric: KPIMetricKey) => {
+      return apiClient<ResolvedFormulaConfig>(
+        `/api/v1/projects/${projectId}/kpis/formulas/${metric}/reset`,
+        { method: 'POST' },
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['kpi-formulas', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['kpi-dashboard', projectId] });
+    },
+  });
+}
+
+export function usePreviewKPIFormula(projectId: string) {
+  const { demoMode } = useDemoMode();
+  return useMutation({
+    mutationFn: async ({
+      metric,
+      parameters,
+      expression,
+    }: {
+      metric: KPIMetricKey;
+      parameters: FormulaParameters;
+      expression: string | null;
+    }): Promise<FormulaPreviewResult> => {
+      if (demoMode) {
+        return previewDemoFormula(projectId, metric, parameters, expression);
+      }
+      return apiClient<FormulaPreviewResult>(
+        `/api/v1/projects/${projectId}/kpis/formulas/${metric}/preview`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ parameters, expression }),
+        },
+      );
     },
   });
 }

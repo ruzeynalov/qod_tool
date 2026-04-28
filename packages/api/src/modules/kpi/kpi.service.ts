@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { KPIMetric } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
+import { KPIFormulaService } from './kpi-formula.service';
 
 type RAGStatus = 'green' | 'amber' | 'red';
 
@@ -46,7 +47,10 @@ export class KPIService {
   private readonly dashboardCache = new Map<string, CacheEntry<any>>();
   private readonly snapshotsCache = new Map<string, CacheEntry<any>>();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly formulaService: KPIFormulaService,
+  ) {}
 
   /**
    * A5: Invalidate all cached data for a project.
@@ -153,9 +157,10 @@ export class KPIService {
       return cached.data;
     }
 
-    const [latestSnapshots, targets] = await Promise.all([
+    const [latestSnapshots, targets, changePoints] = await Promise.all([
       this.getLatestSnapshots(projectId),
       this.getTargets(projectId),
+      this.formulaService.getFormulaChangePoints(projectId, 30),
     ]);
 
     if (latestSnapshots.length === 0) return [];
@@ -196,6 +201,7 @@ export class KPIService {
             value: s.value,
           })),
           trend: trend === 'up' ? 'UP' : trend === 'down' ? 'DOWN' : 'FLAT',
+          formulaChangedAt: (changePoints as any)[snapshot.metric] ?? [],
         };
       }),
     );

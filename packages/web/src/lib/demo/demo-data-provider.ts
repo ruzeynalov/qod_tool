@@ -3,9 +3,13 @@
 // a backend connection.  Every helper is synchronous and caches its
 // generated data per project so repeated calls are cheap.
 
+import { Parser } from 'expr-eval';
 import {
   generateDemoData,
   DEFAULT_DEMO_CONFIG,
+  KPI_FORMULA_DEFINITION_LIST,
+  buildResolvedConfig,
+  resolveParameters,
   type DemoConfig,
   type DemoDataSet,
   type DemoTestCase,
@@ -13,6 +17,10 @@ import {
   type DemoDefect,
   type DemoStory,
   type DemoKPISnapshot,
+  type FormulaParameters,
+  type FormulaPreviewResult,
+  type KPIMetricKey,
+  type ResolvedFormulaConfig,
 } from '@qod/shared';
 
 // ── Demo project definitions ──────────────────────────────────────────
@@ -130,6 +138,13 @@ export interface KPICard {
   ragStatus: 'RED' | 'AMBER' | 'GREEN' | 'NONE';
   sparkline: number[];
   trend: 'UP' | 'DOWN' | 'FLAT';
+  /**
+   * ISO timestamps when the formula configuration changed inside the
+   * sparkline window. Empty in demo mode (no overrides ever exist).
+   * The KPI dashboard renders a vertical marker on the trend chart at
+   * each timestamp so trend shifts can be correlated with formula edits.
+   */
+  formulaChangedAt?: string[];
 }
 
 function computeRag(metric: string, value: number, target: number): 'RED' | 'AMBER' | 'GREEN' {
@@ -928,4 +943,361 @@ function computeOpenBurndown(
     }
     return { week: weekStart.toISOString().slice(0, 10), open: openCount };
   });
+}
+
+// ── Demo-mode KPI formula configs + JS preview compute ────────────────
+// Demo mode is read-only and never carries override rows, so the API
+// response is mirrored as `{ definitions, configs }` with all configs
+// returning registry defaults. previewDemoFormula re-implements the
+// backend's parameterized compute against the in-memory demo dataset.
+
+export function getDemoFormulaConfigs(): {
+  definitions: typeof KPI_FORMULA_DEFINITION_LIST;
+  configs: ResolvedFormulaConfig[];
+} {
+  const configs = KPI_FORMULA_DEFINITION_LIST.map((d) =>
+    buildResolvedConfig(d.metric, null),
+  );
+  return { definitions: KPI_FORMULA_DEFINITION_LIST, configs };
+}
+
+function asInt(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isInteger(v) ? v : fallback;
+}
+function asBool(v: unknown, fallback: boolean): boolean {
+  return typeof v === 'boolean' ? v : fallback;
+}
+function asStr(v: unknown, fallback: string): string {
+  return typeof v === 'string' ? v : fallback;
+}
+function asStrArr(v: unknown, fallback: string[]): string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === 'string') ? (v as string[]) : fallback;
+}
+function meanOf(xs: number[]): number {
+  return xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;
+}
+function medianOf(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const sorted = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function evaluateDemoExpression(
+  metric: KPIMetricKey,
+  expression: string | null,
+  variables: Record<string, number>,
+): number {
+  const fallback = (() => {
+    // The registry default lives on the API side; for demo we hardcode the
+    // same defaults that ship in @qod/shared.
+    switch (metric) {
+      case 'COVERAGE_PCT':
+        return '100 * automatedCount / totalTestCases';
+      case 'PASS_RATE_7D':
+      case 'PASS_RATE_30D':
+        return '100 * passedResults / totalResults';
+      case 'FLAKY_RATE':
+        return '100 * flakyTestCount / automatedTestCount';
+      case 'MTTD_HOURS':
+        return 'meanFailureLatencyHours';
+      case 'MTTR_HOURS':
+        return 'medianResolutionHours';
+      case 'ESCAPE_RATE':
+        return '100 * escapedDefectCount / totalDefectCount';
+      case 'EXEC_VELOCITY':
+        return 'runCount / windowDays';
+      case 'REQ_COVERAGE':
+        return '100 * coveredStoryCount / totalStoryCount';
+      case 'DEFECT_DENSITY':
+        return '100 * openDefectCount / totalTestCases';
+      case 'READINESS_SCORE':
+        return '0.4 * passRate7d + 0.3 * coverage + 0.3 * (100 - criticalRatio)';
+    }
+  })();
+  const expr = (expression && expression.trim()) || fallback || '0';
+  try {
+    const result = Parser.parse(expr).evaluate(variables);
+    if (typeof result === 'number' && Number.isFinite(result)) return result;
+  } catch {
+    /* fall through to default */
+  }
+  if (fallback) {
+    try {
+      const result = Parser.parse(fallback).evaluate(variables);
+      if (typeof result === 'number' && Number.isFinite(result)) return result;
+    } catch {
+      /* swallow */
+    }
+  }
+  return 0;
+}
+
+function computeDemoCoverageScalars(ds: DemoDataSet) {
+  let automatedCount = 0;
+  let notAutomatedCount = 0;
+  let needsUpdateCount = 0;
+  for (const tc of ds.testCases) {
+    switch (tc.automationStatus) {
+      case 'AUTOMATED': automatedCount++; break;
+      case 'NOT_AUTOMATED': notAutomatedCount++; break;
+      case 'NEEDS_UPDATE': needsUpdateCount++; break;
+    }
+  }
+  return {
+    automatedCount,
+    notAutomatedCount,
+    needsUpdateCount,
+    totalTestCases: ds.testCases.length,
+  };
+}
+
+function computeDemoPassRateScalars(ds: DemoDataSet, windowDays: number) {
+  const since = Date.now() - windowDays * 86_400_000;
+  const counts: Record<string, number> = {
+    passedResults: 0,
+    failedResults: 0,
+    skippedResults: 0,
+    errorResults: 0,
+    flakyResults: 0,
+  };
+  let totalResults = 0;
+  for (const run of ds.testRuns) {
+    if (run.startedAt.getTime() < since) continue;
+    for (const r of run.results) {
+      totalResults++;
+      switch (r.status) {
+        case 'PASSED': counts.passedResults++; break;
+        case 'FAILED': counts.failedResults++; break;
+        case 'SKIPPED': counts.skippedResults++; break;
+        case 'FLAKY': counts.flakyResults++; break;
+      }
+    }
+  }
+  return { ...counts, totalResults, windowDays };
+}
+
+function computeDemoFlakyScalars(ds: DemoDataSet, p: FormulaParameters) {
+  const windowDays = asInt(p.windowDays, 90);
+  const minTransitions = asInt(p.minTransitions, 2);
+  const automated = new Set(asStrArr(p.automatedStatuses, ['AUTOMATED']));
+  const since = Date.now() - windowDays * 86_400_000;
+
+  const recentRuns = ds.testRuns
+    .filter((r) => r.startedAt.getTime() >= since)
+    .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+
+  const automatedTests = ds.testCases.filter((tc) => automated.has(tc.automationStatus));
+  let flakyTestCount = 0;
+
+  if (recentRuns.length > 0 && automatedTests.length > 0) {
+    for (const tc of automatedTests) {
+      const statuses: ('PASSED' | 'FAILED')[] = [];
+      for (const run of recentRuns) {
+        const r = run.results.find((rr) => rr.testCaseId === tc.id);
+        if (!r) continue;
+        if (r.status === 'PASSED' || r.status === 'FAILED') statuses.push(r.status);
+      }
+      if (statuses.length < 2) continue;
+      let transitions = 0;
+      for (let i = 1; i < statuses.length; i++) {
+        if (statuses[i] !== statuses[i - 1]) transitions++;
+      }
+      if (transitions >= minTransitions) flakyTestCount++;
+    }
+  }
+
+  return {
+    flakyTestCount,
+    automatedTestCount: automatedTests.length,
+    runCount: recentRuns.length,
+  };
+}
+
+function computeDemoMTTDScalars(ds: DemoDataSet, p: FormulaParameters) {
+  const requireSha = asBool(p.requireSha, true);
+  const failedSet = new Set(asStrArr(p.failedStatuses, ['FAILED']));
+
+  const hours: number[] = [];
+  for (const run of ds.testRuns) {
+    if (requireSha && !run.sha) continue;
+    const hasFailure = run.results.some((r) => failedSet.has(r.status));
+    if (!hasFailure) continue;
+    hours.push(run.durationMs / 3_600_000 / 2); // approximate detection latency
+  }
+  return {
+    meanFailureLatencyHours: hours.length === 0 ? 0 : meanOf(hours),
+    medianFailureLatencyHours: hours.length === 0 ? 0 : medianOf(hours),
+    failedRunCount: hours.length,
+  };
+}
+
+function computeDemoMTTRScalars(ds: DemoDataSet, p: FormulaParameters) {
+  const windowDays = asInt(p.windowDays, 90);
+  const since = Date.now() - windowDays * 86_400_000;
+
+  const hours: number[] = [];
+  for (const d of ds.defects) {
+    if (!d.resolvedAt) continue;
+    if (d.createdAt.getTime() < since) continue;
+    hours.push((d.resolvedAt.getTime() - d.createdAt.getTime()) / 3_600_000);
+  }
+  return {
+    meanResolutionHours: hours.length === 0 ? 0 : meanOf(hours),
+    medianResolutionHours: hours.length === 0 ? 0 : medianOf(hours),
+    p90ResolutionHours: hours.length === 0 ? 0 : percentileOf(hours, 90),
+    resolvedDefectCount: hours.length,
+  };
+}
+
+function computeDemoEscapeScalars(ds: DemoDataSet) {
+  return {
+    escapedDefectCount: ds.defects.filter((d) => d.isEscaped).length,
+    totalDefectCount: ds.defects.length,
+  };
+}
+
+function computeDemoVelocityScalars(ds: DemoDataSet, p: FormulaParameters) {
+  const windowDays = asInt(p.windowDays, 7);
+  const since = Date.now() - windowDays * 86_400_000;
+  const runCount = ds.testRuns.filter((r) => r.startedAt.getTime() >= since).length;
+  return { runCount, windowDays };
+}
+
+function computeDemoReqCoverageScalars(ds: DemoDataSet, p: FormulaParameters) {
+  const pattern = asStr(p.referencePattern, '[A-Z]+-\\d+');
+  let regex: RegExp;
+  try {
+    regex = new RegExp(pattern, 'g');
+  } catch {
+    regex = /[A-Z]+-\d+/g;
+  }
+
+  const referenced = new Set<string>();
+  for (const tc of ds.testCases) {
+    const refs = (tc as DemoTestCase).references ?? '';
+    if (!refs) continue;
+    const matches = refs.match(regex);
+    if (matches) for (const m of matches) referenced.add(m);
+  }
+
+  const totalStoryCount = ds.stories.length;
+  const coveredStoryCount = ds.stories.filter(
+    (s) => s.externalId && referenced.has(s.externalId),
+  ).length;
+  return {
+    coveredStoryCount,
+    uncoveredStoryCount: totalStoryCount - coveredStoryCount,
+    totalStoryCount,
+  };
+}
+
+function computeDemoDensityScalars(ds: DemoDataSet, p: FormulaParameters) {
+  const openSet = new Set(asStrArr(p.openStatuses, ['OPEN', 'IN_PROGRESS', 'REOPENED']));
+  return {
+    openDefectCount: ds.defects.filter((d) => openSet.has(d.status)).length,
+    totalTestCases: ds.testCases.length,
+  };
+}
+
+function percentileOf(xs: number[], p: number): number {
+  if (xs.length === 0) return 0;
+  const sorted = [...xs].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((p / 100) * sorted.length)));
+  return sorted[idx];
+}
+
+function computeDemoReadinessScalars(
+  ds: DemoDataSet,
+  p: FormulaParameters,
+): Record<string, number> {
+  const passRateWindowDays = asInt(p.passRateWindowDays, 7);
+  const criticalSeverities = new Set(asStrArr(p.criticalSeverities, ['CRITICAL']));
+  const openSet = new Set(asStrArr(p.openStatuses, ['OPEN', 'IN_PROGRESS', 'REOPENED']));
+
+  const pass7dVars = computeDemoPassRateScalars(ds, passRateWindowDays);
+  const pass30dVars = computeDemoPassRateScalars(ds, 30);
+  const covVars = computeDemoCoverageScalars(ds);
+  const flakyVars = computeDemoFlakyScalars(ds, {
+    windowDays: 90,
+    minTransitions: 2,
+    automatedStatuses: ['AUTOMATED'],
+  });
+  const mttdVars = computeDemoMTTDScalars(ds, { requireSha: true, failedStatuses: ['FAILED'] });
+  const mttrVars = computeDemoMTTRScalars(ds, { windowDays: 90 });
+  const escapeVars = computeDemoEscapeScalars(ds);
+  const execVars = computeDemoVelocityScalars(ds, { windowDays: 7 });
+  const reqVars = computeDemoReqCoverageScalars(ds, { referencePattern: '[A-Z]+-\\d+' });
+  const densityVars = computeDemoDensityScalars(ds, {
+    openStatuses: ['OPEN', 'IN_PROGRESS', 'REOPENED'],
+  });
+
+  const totalDefects = ds.defects.length;
+  const openCritical = ds.defects.filter(
+    (d) => openSet.has(d.status) && criticalSeverities.has(d.severity),
+  ).length;
+  const criticalRatio = totalDefects === 0 ? 0 : (openCritical / totalDefects) * 100;
+
+  return {
+    passRate7d: evaluateDemoExpression('PASS_RATE_7D', null, pass7dVars),
+    passRate30d: evaluateDemoExpression('PASS_RATE_30D', null, pass30dVars),
+    coverage: evaluateDemoExpression('COVERAGE_PCT', null, covVars),
+    flakyRate: evaluateDemoExpression('FLAKY_RATE', null, flakyVars),
+    mttdHours: evaluateDemoExpression('MTTD_HOURS', null, mttdVars),
+    mttrHours: evaluateDemoExpression('MTTR_HOURS', null, mttrVars),
+    escapeRate: evaluateDemoExpression('ESCAPE_RATE', null, escapeVars),
+    execVelocity: evaluateDemoExpression('EXEC_VELOCITY', null, execVars),
+    reqCoverage: evaluateDemoExpression('REQ_COVERAGE', null, reqVars),
+    defectDensity: evaluateDemoExpression('DEFECT_DENSITY', null, densityVars),
+    criticalRatio,
+  };
+}
+
+export function previewDemoFormula(
+  projectId: string,
+  metric: KPIMetricKey,
+  parameters: FormulaParameters,
+  expression: string | null,
+): FormulaPreviewResult {
+  const ds = getDemoDataForProject(projectId);
+  const merged = resolveParameters(metric, parameters);
+
+  let breakdown: Record<string, number> = {};
+  switch (metric) {
+    case 'COVERAGE_PCT':
+      breakdown = computeDemoCoverageScalars(ds);
+      break;
+    case 'PASS_RATE_7D':
+    case 'PASS_RATE_30D':
+      breakdown = computeDemoPassRateScalars(ds, asInt(merged.windowDays, 7));
+      break;
+    case 'FLAKY_RATE':
+      breakdown = computeDemoFlakyScalars(ds, merged);
+      break;
+    case 'MTTD_HOURS':
+      breakdown = computeDemoMTTDScalars(ds, merged);
+      break;
+    case 'MTTR_HOURS':
+      breakdown = computeDemoMTTRScalars(ds, merged);
+      break;
+    case 'ESCAPE_RATE':
+      breakdown = computeDemoEscapeScalars(ds);
+      break;
+    case 'EXEC_VELOCITY':
+      breakdown = computeDemoVelocityScalars(ds, merged);
+      break;
+    case 'REQ_COVERAGE':
+      breakdown = computeDemoReqCoverageScalars(ds, merged);
+      break;
+    case 'DEFECT_DENSITY':
+      breakdown = computeDemoDensityScalars(ds, merged);
+      break;
+    case 'READINESS_SCORE':
+      breakdown = computeDemoReadinessScalars(ds, merged);
+      break;
+  }
+
+  const value = evaluateDemoExpression(metric, expression, breakdown);
+  const hasData = !((metric === 'MTTD_HOURS' || metric === 'MTTR_HOURS') && value === 0);
+  return { metric, value, hasData, breakdown };
 }

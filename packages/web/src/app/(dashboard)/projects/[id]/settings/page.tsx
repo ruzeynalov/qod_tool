@@ -24,16 +24,6 @@ import {
   Upload,
   ScrollText,
   Calculator,
-  ShieldCheck,
-  CheckCircle2,
-  Zap,
-  Clock,
-  Gauge,
-  Rocket,
-  ArrowUpRight,
-  ArrowDownRight,
-  Bug,
-  BarChart3,
 } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
 import { formatRelativeTime } from '@/lib/utils/format';
@@ -48,6 +38,7 @@ import { apiClient } from '@/lib/api/client';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useDemoMode } from '@/app/_providers/demo-mode-provider';
 import { useAuth } from '@/app/_providers/auth-provider';
+import { KPIFormulaConfigurator } from './_components/kpi-formula-configurator';
 
 // ─── Tab definitions ───────────────────────────────────────────────────
 
@@ -1514,321 +1505,17 @@ function GeneralTab() {
 }
 
 // ─── KPI Formulas Tab ────────────────────────────────────────────────
-// Keep formula descriptions in sync with packages/api/src/modules/aggregation/aggregation.service.ts
+// The full configurator (registry rendering, parameter forms, live preview)
+// lives in `_components/kpi-formula-configurator/`. This wrapper only owns
+// the page's read-only / admin gating.
 
-interface FormulaDefinition {
-  label: string;
-  icon: React.ReactNode;
-  description: string;
-  formula: string;
-  variables: { name: string; detail: string }[];
-  dataWindow: string;
-  direction: 'higher' | 'lower';
-  unit: string;
-  thresholds: { green: string; amber: string; red: string };
-  howItWorks?: string;
-  placeholder?: boolean;
+function KPIFormulasTab({ projectId, readOnly }: { projectId: string; readOnly: boolean }) {
+  return <KPIFormulaConfigurator projectId={projectId} readOnly={readOnly} />;
 }
 
-const TESTING_FORMULAS: FormulaDefinition[] = [
-  {
-    label: 'Automation Coverage',
-    icon: <ShieldCheck className="h-4 w-4" />,
-    description: 'What percentage of your test cases are automated? Higher coverage means less manual testing effort.',
-    formula: '( Automated Tests / Total Tests ) × 100',
-    variables: [
-      { name: 'Automated Tests', detail: 'Test cases with status "AUTOMATED"' },
-      { name: 'Total Tests', detail: 'All non-deleted test cases in the project' },
-    ],
-    dataWindow: 'All time',
-    direction: 'higher',
-    unit: '%',
-    thresholds: { green: '≥ 80%', amber: '≥ 50%', red: '< 50%' },
-  },
-  {
-    label: 'Pass Rate (7d)',
-    icon: <CheckCircle2 className="h-4 w-4" />,
-    description: 'Of all test results in the past 7 days, what percentage passed? A recent snapshot of test health.',
-    formula: '( Passed Results / Total Results ) × 100',
-    variables: [
-      { name: 'Passed Results', detail: 'Results with status "PASSED" in the last 7 days' },
-      { name: 'Total Results', detail: 'All test results (any status) in the last 7 days' },
-    ],
-    dataWindow: 'Last 7 days',
-    direction: 'higher',
-    unit: '%',
-    thresholds: { green: '≥ 90%', amber: '≥ 75%', red: '< 75%' },
-  },
-  {
-    label: 'Pass Rate (30d)',
-    icon: <CheckCircle2 className="h-4 w-4" />,
-    description: 'Same as 7-day pass rate but over a 30-day window. Shows longer-term test stability.',
-    formula: '( Passed Results / Total Results ) × 100',
-    variables: [
-      { name: 'Passed Results', detail: 'Results with status "PASSED" in the last 30 days' },
-      { name: 'Total Results', detail: 'All test results (any status) in the last 30 days' },
-    ],
-    dataWindow: 'Last 30 days',
-    direction: 'higher',
-    unit: '%',
-    thresholds: { green: '≥ 90%', amber: '≥ 75%', red: '< 75%' },
-  },
-  {
-    label: 'Flaky Test Rate',
-    icon: <Zap className="h-4 w-4" />,
-    description: 'What percentage of automated tests are flaky? Flaky tests pass and fail unpredictably, eroding trust in results.',
-    formula: '( Flaky Tests / Automated Tests ) × 100',
-    variables: [
-      { name: 'Flaky Tests', detail: 'Automated tests with 2+ status transitions (e.g. PASS→FAIL→PASS) across recent runs' },
-      { name: 'Automated Tests', detail: 'All test cases marked as "AUTOMATED"' },
-    ],
-    dataWindow: 'Last 25 runs within 90 days',
-    direction: 'lower',
-    unit: '%',
-    thresholds: { green: '≤ 5%', amber: '≤ 15%', red: '> 15%' },
-    howItWorks: 'A test is flaky if its results flip between PASS and FAIL at least twice across recent runs (e.g. PASS → FAIL → PASS). A single transition (like a new regression) is not counted — it must show a pattern of instability. QOD examines the last 25 test runs within a 90-day window.',
-  },
-  {
-    label: 'Mean Time to Detect',
-    icon: <Clock className="h-4 w-4" />,
-    description: 'How quickly does your CI pipeline detect failures after code is committed? Lower means problems are caught faster.',
-    formula: 'Average of ( First Failure Time − Run Start Time )',
-    variables: [
-      { name: 'First Failure Time', detail: 'Timestamp of the earliest FAILED result in a CI run' },
-      { name: 'Run Start Time', detail: 'When the CI run started; only runs with a git commit (SHA) are included' },
-    ],
-    dataWindow: 'All CI runs with failures',
-    direction: 'lower',
-    unit: 'hours',
-    thresholds: { green: '≤ 4h', amber: '≤ 12h', red: '> 12h' },
-  },
-];
-
-const DEFECT_FORMULAS: FormulaDefinition[] = [
-  {
-    label: 'Median Time to Resolve',
-    icon: <Clock className="h-4 w-4" />,
-    description: 'How long does it take to resolve defects? Uses the median (not average) to avoid outlier skew from long-lived bugs.',
-    formula: 'Median of ( Resolved At − Created At )',
-    variables: [
-      { name: 'Resolved At', detail: 'When the defect was marked as resolved' },
-      { name: 'Created At', detail: 'When the defect was first created' },
-    ],
-    dataWindow: 'Defects created in last 90 days',
-    direction: 'lower',
-    unit: 'hours',
-    thresholds: { green: '≤ 48h (2d)', amber: '≤ 168h (7d)', red: '> 168h' },
-    howItWorks: 'Uses the median instead of average. If you have 9 defects resolved in 1 day and 1 defect that took 6 months, MTTR reflects the typical case (1 day) rather than being pulled up by the outlier.',
-  },
-  {
-    label: 'Defect Escape Rate',
-    icon: <AlertTriangle className="h-4 w-4" />,
-    description: 'What percentage of defects were found in production rather than caught during testing? Lower means your testing is more effective.',
-    formula: '( Escaped Defects / Total Defects ) × 100',
-    variables: [
-      { name: 'Escaped Defects', detail: 'Defects tagged with the escaped label (configurable in connector settings)' },
-      { name: 'Total Defects', detail: 'All non-deleted defects in the project' },
-    ],
-    dataWindow: 'All time',
-    direction: 'lower',
-    unit: '%',
-    thresholds: { green: '≤ 5%', amber: '≤ 15%', red: '> 15%' },
-  },
-  {
-    label: 'Defect Density',
-    icon: <Bug className="h-4 w-4" />,
-    description: 'How many open defects exist relative to the size of your test suite? Lower density means fewer outstanding issues per test case.',
-    formula: '( Open Defects / Total Test Cases ) × 100',
-    variables: [
-      { name: 'Open Defects', detail: 'Defects with status OPEN, IN_PROGRESS, or REOPENED' },
-      { name: 'Total Test Cases', detail: 'All non-deleted test cases in the project' },
-    ],
-    dataWindow: 'Real-time',
-    direction: 'lower',
-    unit: '%',
-    thresholds: { green: '≤ 2%', amber: '≤ 5%', red: '> 5%' },
-  },
-];
-
-const COMPOSITE_FORMULAS: FormulaDefinition[] = [
-  {
-    label: 'Release Readiness',
-    icon: <Rocket className="h-4 w-4" />,
-    description: 'A weighted composite score combining multiple KPIs into a single release-readiness indicator. Answers: "Are we ready to ship?"',
-    formula: '0.4 × Pass Rate (7d)  +  0.3 × Coverage  +  0.3 × (100 − Critical Defect Ratio)',
-    variables: [
-      { name: 'Pass Rate (7d)', detail: '7-day pass rate (40% weight) — strongest signal of current quality' },
-      { name: 'Coverage', detail: 'Automation coverage percentage (30% weight)' },
-      { name: 'Critical Defect Ratio', detail: '(Open Critical Defects / Total Defects) × 100 — penalizes open critical bugs (30% weight)' },
-    ],
-    dataWindow: 'Real-time (computed from current metrics)',
-    direction: 'higher',
-    unit: 'score',
-    thresholds: { green: '≥ 80', amber: '≥ 60', red: '< 60' },
-    howItWorks: 'If all tests pass (100%), coverage is complete (100%), and there are no critical bugs (ratio = 0, so 100 − 0 = 100), the readiness score would be 100. The weights reflect that recent test results (40%) are the strongest signal, while coverage and defect health (30% each) provide supporting context.',
-  },
-  {
-    label: 'Requirement Coverage',
-    icon: <BookOpen className="h-4 w-4" />,
-    description: 'What percentage of your Jira stories have at least one linked test case in TestRail? Higher means more of your requirements are verified by tests.',
-    formula: '( Stories with ≥ 1 Test Case / Total Stories ) × 100',
-    variables: [
-      { name: 'Stories with ≥ 1 Test Case', detail: 'Jira stories whose key (e.g. PS-123) appears in any TestRail test case\'s "References" field' },
-      { name: 'Total Stories', detail: 'All non-deleted stories synced from Jira' },
-    ],
-    dataWindow: 'All time',
-    direction: 'higher',
-    unit: '%',
-    thresholds: { green: '≥ 80%', amber: '≥ 50%', red: '< 50%' },
-    howItWorks: 'QOD matches Jira story keys (like PS-123) against the "References" field in TestRail test cases. If a test case has references "PS-123, PS-456", both stories are considered covered. To improve this metric, add Jira ticket keys to the References field when creating test cases in TestRail.',
-  },
-];
-
-function FormulaCard({ def }: { def: FormulaDefinition }) {
-  return (
-    <Card padding="md" className={cn(def.placeholder && 'opacity-60')}>
-      <div className="space-y-3">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-secondary">{def.icon}</span>
-            <h4 className="text-sm font-semibold text-primary">{def.label}</h4>
-          </div>
-          {def.placeholder ? (
-            <Badge variant="neutral">Not Implemented</Badge>
-          ) : (
-            <Badge variant={def.direction === 'higher' ? 'success' : 'info'}>
-              {def.direction === 'higher' ? (
-                <span className="flex items-center gap-0.5"><ArrowUpRight className="h-3 w-3" /> Higher is better</span>
-              ) : (
-                <span className="flex items-center gap-0.5"><ArrowDownRight className="h-3 w-3" /> Lower is better</span>
-              )}
-            </Badge>
-          )}
-        </div>
-
-        {/* Description */}
-        <p className="text-sm text-secondary">{def.description}</p>
-
-        {!def.placeholder && (
-          <>
-            {/* Formula box */}
-            <div className="rounded-md border border-qod-border bg-qod-bg px-4 py-3 font-mono text-sm text-primary">
-              {def.formula}
-            </div>
-
-            {/* Variables */}
-            {def.variables.length > 0 && (
-              <div className="space-y-1.5">
-                <p className="text-xs font-medium text-muted">Where:</p>
-                <ul className="space-y-1 pl-1">
-                  {def.variables.map((v) => (
-                    <li key={v.name} className="flex items-start gap-2 text-xs text-secondary">
-                      <span className="mt-0.5 text-muted">•</span>
-                      <span><span className="font-medium text-primary">{v.name}</span> — {v.detail}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {/* Metadata */}
-            <div className="flex flex-wrap gap-4 text-xs text-muted">
-              <span>Window: <span className="text-secondary">{def.dataWindow}</span></span>
-              <span>Unit: <span className="text-secondary">{def.unit}</span></span>
-            </div>
-
-            {/* Thresholds */}
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-muted">Thresholds:</span>
-              <Badge variant="success">{def.thresholds.green}</Badge>
-              <Badge variant="warning">{def.thresholds.amber}</Badge>
-              <Badge variant="error">{def.thresholds.red}</Badge>
-            </div>
-
-            {/* How it works (complex metrics) */}
-            {def.howItWorks && (
-              <div className="flex items-start gap-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-2.5">
-                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-blue-400" />
-                <p className="text-xs text-secondary">{def.howItWorks}</p>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </Card>
-  );
-}
-
-function KPIFormulasTab() {
-  const categories: { title: string; icon: React.ReactNode; formulas: FormulaDefinition[] }[] = [
-    { title: 'Testing Metrics', icon: <CheckCircle2 className="h-4 w-4" />, formulas: TESTING_FORMULAS },
-    { title: 'Defect Metrics', icon: <Bug className="h-4 w-4" />, formulas: DEFECT_FORMULAS },
-    { title: 'Composite Metrics', icon: <BarChart3 className="h-4 w-4" />, formulas: COMPOSITE_FORMULAS },
-  ];
-
-  return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h2 className="text-lg font-semibold text-primary">KPI Formulas Reference</h2>
-        <p className="mt-0.5 text-xs text-muted">
-          How each quality metric is calculated, what data it uses, and what the thresholds mean.
-        </p>
-      </div>
-
-      {/* RAG & Trend explanation */}
-      <Card padding="md">
-        <div className="space-y-4">
-          <div className="flex items-start gap-3">
-            <Info className="mt-0.5 h-4 w-4 shrink-0 text-blue-400" />
-            <div className="space-y-3 text-sm text-secondary">
-              <div>
-                <p className="font-medium text-primary">RAG Status (Red / Amber / Green)</p>
-                <p className="mt-1 text-xs">
-                  Each metric is color-coded based on configurable thresholds set in the KPI Thresholds tab.
-                </p>
-                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <div className="rounded-md bg-qod-bg px-3 py-2 text-xs">
-                    <span className="font-medium">Higher is better</span> (e.g. Pass Rate):
-                    <br />value {'≥'} green = <span className="text-rag-green">GREEN</span>, value {'≥'} amber = <span className="text-rag-amber">AMBER</span>, else <span className="text-rag-red">RED</span>
-                  </div>
-                  <div className="rounded-md bg-qod-bg px-3 py-2 text-xs">
-                    <span className="font-medium">Lower is better</span> (e.g. Escape Rate):
-                    <br />value {'≤'} green = <span className="text-rag-green">GREEN</span>, value {'≤'} amber = <span className="text-rag-amber">AMBER</span>, else <span className="text-rag-red">RED</span>
-                  </div>
-                </div>
-              </div>
-              <div className="border-t border-qod-border pt-3">
-                <p className="font-medium text-primary">Trend (Up / Down / Flat)</p>
-                <p className="mt-1 text-xs">
-                  Compares the 7-day rolling average against the previous 7-day average. If the difference
-                  exceeds a small threshold (1% of previous value or 0.5 absolute, whichever is larger),
-                  the trend is marked UP or DOWN. Otherwise it&apos;s FLAT.
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </Card>
-
-      {/* Metric categories */}
-      {categories.map((cat) => (
-        <div key={cat.title} className="space-y-3">
-          <div className="flex items-center gap-2">
-            <span className="text-secondary">{cat.icon}</span>
-            <h3 className="text-xs font-medium uppercase tracking-wider text-secondary">{cat.title}</h3>
-          </div>
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-            {cat.formulas.map((def) => (
-              <FormulaCard key={def.label} def={def} />
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
+// Legacy reference cards (TESTING_FORMULAS, DEFECT_FORMULAS,
+// COMPOSITE_FORMULAS, FormulaCard) lived here previously; their content
+// now sources from the @qod/shared registry consumed by the configurator.
 
 // ─── Main Page ───────────────────────────────────────────────────────
 
@@ -1839,7 +1526,13 @@ export default function ProjectSettingsPage() {
   const { demoMode } = useDemoMode();
   const { isAdmin } = useAuth();
 
-  const isEditableTab = activeTab === 'connectors' || activeTab === 'kpi-thresholds' || activeTab === 'general';
+  const isEditableTab =
+    activeTab === 'connectors' ||
+    activeTab === 'kpi-thresholds' ||
+    activeTab === 'kpi-formulas' ||
+    activeTab === 'general';
+
+  const formulasReadOnly = demoMode || !isAdmin;
 
   return (
     <div className="space-y-6">
@@ -1852,21 +1545,35 @@ export default function ProjectSettingsPage() {
             ? 'Settings are read-only in demo mode. Disable demo mode to make changes.'
             : activeTab === 'connectors'
               ? 'Connector configuration is read-only. You can trigger sync for configured connectors.'
-              : 'Settings are read-only. Only administrators can modify settings.'}
+              : activeTab === 'kpi-formulas'
+                ? 'Formula editing is read-only. You can still tweak parameters to see the live preview, but saving requires admin access.'
+                : 'Settings are read-only. Only administrators can modify settings.'}
         </div>
       )}
 
       {/* Connectors tab: members can sync but not edit — rendered outside the inert wrapper */}
       {activeTab === 'connectors' && <ConnectorsTab projectId={id} readOnly={!isAdmin || demoMode} />}
 
+      {/* KPI Formulas: rendered outside the inert wrapper so the live preview
+          stays interactive even in read-only mode. The configurator handles
+          its own admin gating via the `readOnly` prop. */}
+      {activeTab === 'kpi-formulas' && (
+        <KPIFormulasTab projectId={id} readOnly={formulasReadOnly} />
+      )}
+
       {/* Other editable tabs: fully locked for non-admins */}
       <div
-        className={(demoMode || !isAdmin) && isEditableTab && activeTab !== 'connectors' ? 'pointer-events-none opacity-50' : ''}
+        className={
+          (demoMode || !isAdmin) && isEditableTab && activeTab !== 'connectors' && activeTab !== 'kpi-formulas'
+            ? 'pointer-events-none opacity-50'
+            : ''
+        }
         // eslint-disable-next-line
-        {...((demoMode || !isAdmin) && isEditableTab && activeTab !== 'connectors' ? { inert: '' as any } : {})}
+        {...((demoMode || !isAdmin) && isEditableTab && activeTab !== 'connectors' && activeTab !== 'kpi-formulas'
+          ? { inert: '' as any }
+          : {})}
       >
         {activeTab === 'kpi-thresholds' && <KPIThresholdsTab />}
-        {activeTab === 'kpi-formulas' && <KPIFormulasTab />}
         {activeTab === 'general' && <GeneralTab />}
       </div>
     </div>
