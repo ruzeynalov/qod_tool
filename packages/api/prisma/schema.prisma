@@ -38,16 +38,17 @@ model User {
   name      String
   avatarUrl String?    @map("avatar_url")
   role      GlobalRole @default(MEMBER)
-  password  String?    // hashed, null for SSO-only
+  password  String? // hashed, null for SSO-only
   blockedAt DateTime?  @map("blocked_at")
   createdAt DateTime   @default(now()) @map("created_at")
   updatedAt DateTime   @updatedAt @map("updated_at")
 
-  organization     Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  projectMembers   ProjectMember[]
-  dashboardLayouts DashboardLayout[]
-  auditLogs        AuditLog[]
-  notifications    Notification[]
+  organization      Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  projectMembers    ProjectMember[]
+  dashboardLayouts  DashboardLayout[]
+  auditLogs         AuditLog[]
+  notifications     Notification[]
+  kpiFormulaConfigs KPIFormulaConfig[]
 
   @@map("users")
 }
@@ -67,21 +68,22 @@ model Project {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  organization     Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  members          ProjectMember[]
-  connectorConfigs ConnectorConfig[]
-  featureAreas     FeatureArea[]
-  testCases        TestCase[]
-  testRuns         TestRun[]
-  defects          Defect[]
-  epics            Epic[]
-  stories          Story[]
-  pipelineRuns     PipelineRun[]
-  kpiSnapshots     KPISnapshot[]
-  kpiTargets       KPITarget[]
-  alertRules       AlertRule[]
-  auditLogs        AuditLog[]
-  notifications    Notification[]
+  organization      Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  members           ProjectMember[]
+  connectorConfigs  ConnectorConfig[]
+  featureAreas      FeatureArea[]
+  testCases         TestCase[]
+  testRuns          TestRun[]
+  defects           Defect[]
+  epics             Epic[]
+  stories           Story[]
+  pipelineRuns      PipelineRun[]
+  kpiSnapshots      KPISnapshot[]
+  kpiTargets        KPITarget[]
+  kpiFormulaConfigs KPIFormulaConfig[]
+  alertRules        AlertRule[]
+  auditLogs         AuditLog[]
+  notifications     Notification[]
 
   @@unique([orgId, slug])
   @@map("projects")
@@ -129,7 +131,7 @@ model ConnectorConfig {
   id            String          @id @default(uuid()) @db.Uuid
   projectId     String          @map("project_id") @db.Uuid
   connectorType ConnectorType   @map("connector_type")
-  name          String          // e.g. "GitHub - my-org/my-repo"
+  name          String // e.g. "GitHub - my-org/my-repo"
   credentials   Json            @default("{}") // encrypted at app level
   fieldMapping  Json            @default("{}") @map("field_mapping")
   syncSchedule  String          @default("*/15 * * * *") @map("sync_schedule") // cron
@@ -190,7 +192,7 @@ model TestCase {
   suiteName        String?          @map("suite_name")
   className        String?          @map("class_name")
   filePath         String?          @map("file_path")
-  references       String?          // external refs (e.g. Jira tickets: "PS-2865, PS-3001")
+  references       String? // external refs (e.g. Jira tickets: "PS-2865, PS-3001")
   testRailType     String?          @map("testrail_type") // TestRail case type name (e.g. "Regression", "Smoke & Sanity")
   firstSeenAt      DateTime         @default(now()) @map("first_seen_at")
   lastExecutedAt   DateTime?        @map("last_executed_at")
@@ -198,8 +200,8 @@ model TestCase {
   createdAt        DateTime         @default(now()) @map("created_at")
   updatedAt        DateTime         @updatedAt @map("updated_at")
 
-  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  featureArea FeatureArea? @relation(fields: [featureAreaId], references: [id], onDelete: SetNull)
+  project     Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  featureArea FeatureArea?     @relation(fields: [featureAreaId], references: [id], onDelete: SetNull)
   testResults TestResult[]
   defects     DefectTestLink[]
 
@@ -398,21 +400,21 @@ enum StoryStatus {
 }
 
 model Story {
-  id           String      @id @default(uuid()) @db.Uuid
-  projectId    String      @map("project_id") @db.Uuid
-  externalId   String?     @map("external_id")
-  title        String
-  url          String?
-  status       StoryStatus @default(OPEN)
-  storyPoints  Int?        @map("story_points")
-  assignee     String?
-  component    String?
-  labels       String[]    @default([])
-  epicId       String?     @map("epic_id") @db.Uuid
-  source       String      @default("jira")
-  createdAt    DateTime    @default(now()) @map("created_at")
-  resolvedAt   DateTime?   @map("resolved_at")
-  updatedAt    DateTime    @updatedAt @map("updated_at")
+  id          String      @id @default(uuid()) @db.Uuid
+  projectId   String      @map("project_id") @db.Uuid
+  externalId  String?     @map("external_id")
+  title       String
+  url         String?
+  status      StoryStatus @default(OPEN)
+  storyPoints Int?        @map("story_points")
+  assignee    String?
+  component   String?
+  labels      String[]    @default([])
+  epicId      String?     @map("epic_id") @db.Uuid
+  source      String      @default("jira")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  resolvedAt  DateTime?   @map("resolved_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   epic    Epic?   @relation(fields: [epicId], references: [id], onDelete: SetNull)
@@ -492,17 +494,42 @@ model KPISnapshot {
 // ─── KPI Target ──────────────────────────────────────────────
 
 model KPITarget {
-  id              String    @id @default(uuid()) @db.Uuid
-  projectId       String    @map("project_id") @db.Uuid
-  metric          KPIMetric
-  target          Float
-  greenThreshold  Float     @map("green_threshold")
-  amberThreshold  Float     @map("amber_threshold")
+  id             String    @id @default(uuid()) @db.Uuid
+  projectId      String    @map("project_id") @db.Uuid
+  metric         KPIMetric
+  target         Float
+  greenThreshold Float     @map("green_threshold")
+  amberThreshold Float     @map("amber_threshold")
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@unique([projectId, metric])
   @@map("kpi_targets")
+}
+
+// ─── KPI Formula Config (per-project parameter overrides) ─────────────
+//
+// Absence of a row for a metric means "use registry defaults". The web
+// configurator merges the registry default with this row at read time;
+// the AggregationService threads the resolved config into compute
+// functions on every run. History (KPISnapshot) is preserved as-is.
+
+model KPIFormulaConfig {
+  id          String    @id @default(uuid()) @db.Uuid
+  projectId   String    @map("project_id") @db.Uuid
+  metric      KPIMetric
+  parameters  Json      @default("{}")
+  expression  String?
+  enabled     Boolean   @default(true)
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  updatedById String?   @map("updated_by_id") @db.Uuid
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  updatedBy User?   @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@unique([projectId, metric])
+  @@index([projectId, updatedAt])
+  @@map("kpi_formula_configs")
 }
 
 // ─── Alert Rule ──────────────────────────────────────────────
@@ -583,7 +610,7 @@ model AuditLog {
   id            String   @id @default(uuid()) @db.Uuid
   projectId     String?  @map("project_id") @db.Uuid
   userId        String   @map("user_id") @db.Uuid
-  action        String   // e.g. "connector.created", "kpi_target.updated"
+  action        String // e.g. "connector.created", "kpi_target.updated"
   entityType    String?  @map("entity_type")
   entityId      String?  @map("entity_id")
   previousValue Json?    @map("previous_value")

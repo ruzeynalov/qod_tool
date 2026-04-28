@@ -38,6 +38,7 @@ export function createPrismaMock() {
     pipelineRun: createModelMock(),
     kPISnapshot: createModelMock(),
     kPITarget: createModelMock(),
+    kPIFormulaConfig: createModelMock(),
     alertRule: createModelMock(),
     dashboardLayout: createModelMock(),
     notification: createModelMock(),

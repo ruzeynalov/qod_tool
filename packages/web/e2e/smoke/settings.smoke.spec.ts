@@ -39,14 +39,23 @@ test.describe('Settings smoke', () => {
     await expect(page.getByRole('button', { name: /save thresholds/i })).toBeVisible();
   });
 
-  test('KPI Formulas tab shows formula reference cards', async ({ demoPage: page }) => {
-    await page.getByText('KPI Formulas', { exact: false }).first().click();
+  test('KPI Formulas tab shows the configurator with editable expressions', async ({ demoPage: page }) => {
+    await page.getByRole('tab', { name: 'KPI Formulas' }).click();
     await page.waitForTimeout(500);
 
-    await expect(page.getByText('KPI Formulas Reference')).toBeVisible();
-    // Should show formula categories
-    await expect(page.getByText('Testing Metrics').first()).toBeVisible();
-    await expect(page.getByText('Defect Metrics').first()).toBeVisible();
+    // New master-detail configurator (replaces the old read-only reference cards).
+    await expect(page.getByRole('heading', { name: 'KPI Formula Configurator' })).toBeVisible();
+
+    // Left-rail category headers (rendered uppercase via CSS) and at least
+    // one metric per group.
+    await expect(page.getByText('Testing', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Defects', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Automation Coverage').first()).toBeVisible();
+
+    // Editor pane shows the editable expression box + live preview panel.
+    await expect(page.getByText('Formula', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Valid expression').first()).toBeVisible();
+    await expect(page.getByText('Live preview', { exact: true }).first()).toBeVisible();
   });
 
   test('General tab shows project name input and danger zone', async ({ demoPage: page }) => {

@@ -297,7 +297,7 @@ export default function KPIDashboardPage() {
     const card = enrichedKpis.find((k) => k.metric === selectedMetric);
     if (!card) return [];
 
-    const meta = METRIC_META[selectedMetric];
+    void METRIC_META[selectedMetric];
     const sparkline = card.sparkline;
 
     // Generate synthetic date labels going backwards from today
@@ -308,15 +308,55 @@ export default function KPIDashboardPage() {
 
     return slicedData.map((point, i) => {
       const val = typeof point === 'number' ? point : (point as any).value ?? 0;
-      const date = new Date(today);
-      date.setDate(date.getDate() - (sliceCount - 1 - i));
+      // Prefer the real recordedAt date when the API provided objects;
+      // fall back to a synthetic countdown for demo-mode number arrays.
+      const realDate = typeof point === 'object' && point && 'date' in (point as any)
+        ? new Date((point as any).date)
+        : null;
+      const date = realDate && !Number.isNaN(realDate.getTime())
+        ? realDate
+        : (() => {
+            const d = new Date(today);
+            d.setDate(d.getDate() - (sliceCount - 1 - i));
+            return d;
+          })();
       return {
         date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
         value: parseFloat(val.toFixed(2)),
         target: card.target,
+        timestamp: date.getTime(),
       };
     });
   }, [enrichedKpis, selectedMetric, rangeDays]);
+
+  // Map formulaChangedAt timestamps onto chart x-axis labels by snapping to
+  // the closest data point. Returns the chart's date label strings used for
+  // ReferenceLine x positioning.
+  const formulaChangeMarkers = useMemo<string[]>(() => {
+    if (!enrichedKpis || detailChartData.length === 0) return [];
+    const card = enrichedKpis.find((k) => k.metric === selectedMetric);
+    const stamps = (card as any)?.formulaChangedAt as string[] | undefined;
+    if (!stamps || stamps.length === 0) return [];
+
+    const labels: string[] = [];
+    const minT = detailChartData[0].timestamp;
+    const maxT = detailChartData[detailChartData.length - 1].timestamp;
+    for (const iso of stamps) {
+      const t = new Date(iso).getTime();
+      if (Number.isNaN(t) || t < minT - 86_400_000 || t > maxT + 86_400_000) continue;
+      let bestIdx = 0;
+      let bestDelta = Infinity;
+      for (let i = 0; i < detailChartData.length; i++) {
+        const delta = Math.abs(detailChartData[i].timestamp - t);
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          bestIdx = i;
+        }
+      }
+      labels.push(detailChartData[bestIdx].date);
+    }
+    return labels;
+  }, [enrichedKpis, detailChartData, selectedMetric]);
 
   const selectedMeta = METRIC_META[selectedMetric];
   const selectedCard = enrichedKpis?.find((k) => k.metric === selectedMetric);
@@ -518,6 +558,21 @@ export default function KPIDashboardPage() {
                   }}
                 />
               )}
+              {formulaChangeMarkers.map((label, idx) => (
+                <ReferenceLine
+                  key={`formula-marker-${label}-${idx}`}
+                  x={label}
+                  stroke={chartColors.accent}
+                  strokeDasharray="2 4"
+                  strokeWidth={1}
+                  label={{
+                    value: 'Formula change',
+                    position: 'top',
+                    fill: chartColors.accent,
+                    fontSize: 9,
+                  }}
+                />
+              ))}
               <Line
                 type="monotone"
                 dataKey="value"

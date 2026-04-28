@@ -37,6 +37,7 @@
     "bullmq": "^5.12.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
+    "expr-eval": "^2.0.2",
     "fast-xml-parser": "^4.5.0",
     "ioredis": "^5.4.0",
     "nestjs-pino": "^4.6.0",

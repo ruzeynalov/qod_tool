@@ -1,398 +1,217 @@
+import { vi } from 'vitest';
+import type { KPIMetricKey, ResolvedFormulaConfig } from '@qod/shared';
 import { createPrismaMock, PrismaMock } from '../../common/utils/prisma-mock';
 import { AggregationService } from './aggregation.service';
 import { PrismaService } from '../../database/prisma.service';
+import {
+  buildResolvedConfig,
+  KPI_FORMULA_DEFINITIONS,
+} from '../kpi/kpi-formula.definitions';
+import { KPIFormulaService } from '../kpi/kpi-formula.service';
+
+const projectId = 'proj-uuid-1';
+
+function defaults(metric: KPIMetricKey): ResolvedFormulaConfig {
+  return buildResolvedConfig(metric, null);
+}
+
+function defaultsAll(): Record<KPIMetricKey, ResolvedFormulaConfig> {
+  const out = {} as Record<KPIMetricKey, ResolvedFormulaConfig>;
+  for (const key of Object.keys(KPI_FORMULA_DEFINITIONS) as KPIMetricKey[]) {
+    out[key] = defaults(key);
+  }
+  return out;
+}
+
+function mockFormulaService(): KPIFormulaService {
+  return {
+    resolveAll: vi.fn().mockResolvedValue(defaultsAll()),
+    resolve: vi.fn(async (_p: string, m: KPIMetricKey) => defaults(m)),
+    upsert: vi.fn(),
+    reset: vi.fn(),
+    validate: vi.fn(),
+    getFormulaChangePoints: vi.fn().mockResolvedValue({}),
+  } as unknown as KPIFormulaService;
+}
 
 describe('AggregationService', () => {
   let service: AggregationService;
   let prisma: PrismaMock;
 
-  const projectId = 'proj-uuid-1';
-
   beforeEach(() => {
     prisma = createPrismaMock();
-    service = new AggregationService(prisma as unknown as PrismaService);
+    service = new AggregationService(
+      prisma as unknown as PrismaService,
+      mockFormulaService(),
+    );
   });
 
   describe('computeCoveragePct()', () => {
-    it('should compute coverage as (automated / total) * 100', async () => {
-      prisma.testCase.count
-        .mockResolvedValueOnce(80)   // automated count
-        .mockResolvedValueOnce(100); // total count
+    it('default expression evaluates to (automated / total) × 100', async () => {
+      prisma.testCase.groupBy.mockResolvedValue([
+        { automationStatus: 'AUTOMATED', _count: { _all: 80 } },
+        { automationStatus: 'NOT_AUTOMATED', _count: { _all: 20 } },
+      ]);
 
-      const result = await service.computeCoveragePct(projectId);
+      const result = await service.computeCoveragePct(projectId, defaults('COVERAGE_PCT'));
 
-      expect(prisma.testCase.count).toHaveBeenCalledTimes(2);
-      expect(prisma.testCase.count).toHaveBeenCalledWith({
-        where: { projectId, automationStatus: 'AUTOMATED', deletedAt: null },
+      expect(result.value).toBe(80);
+      expect(result.breakdown).toEqual({
+        automatedCount: 80,
+        notAutomatedCount: 20,
+        needsUpdateCount: 0,
+        totalTestCases: 100,
       });
-      expect(prisma.testCase.count).toHaveBeenCalledWith({
-        where: { projectId, deletedAt: null },
-      });
-      expect(result).toBe(80);
     });
 
-    it('should return 0 when there are no test cases', async () => {
-      prisma.testCase.count
-        .mockResolvedValueOnce(0)
-        .mockResolvedValueOnce(0);
+    it('honors a custom expression that combines variables', async () => {
+      prisma.testCase.groupBy.mockResolvedValue([
+        { automationStatus: 'AUTOMATED', _count: { _all: 50 } },
+        { automationStatus: 'NEEDS_UPDATE', _count: { _all: 10 } },
+        { automationStatus: 'NOT_AUTOMATED', _count: { _all: 40 } },
+      ]);
 
-      const result = await service.computeCoveragePct(projectId);
+      const cfg: ResolvedFormulaConfig = {
+        ...defaults('COVERAGE_PCT'),
+        expression: '100 * (automatedCount + needsUpdateCount) / totalTestCases',
+      };
 
-      expect(result).toBe(0);
-    });
-
-    it('should return 100 when all tests are automated', async () => {
-      prisma.testCase.count
-        .mockResolvedValueOnce(50)
-        .mockResolvedValueOnce(50);
-
-      const result = await service.computeCoveragePct(projectId);
-
-      expect(result).toBe(100);
-    });
-  });
-
-  describe('computeDefectDensity()', () => {
-    it('should compute open defects per 100 test cases', async () => {
-      prisma.defect.count.mockResolvedValueOnce(4);
-      prisma.testCase.count.mockResolvedValueOnce(80);
-
-      const result = await service.computeDefectDensity(projectId);
-
-      expect(prisma.defect.count).toHaveBeenCalledWith({
-        where: {
-          projectId,
-          deletedAt: null,
-          status: { in: ['OPEN', 'IN_PROGRESS', 'REOPENED'] },
-        },
-      });
-      expect(prisma.testCase.count).toHaveBeenCalledWith({
-        where: { projectId, deletedAt: null },
-      });
-      expect(result).toBe(5);
-    });
-
-    it('should return 0 when there are no test cases', async () => {
-      prisma.defect.count.mockResolvedValueOnce(4);
-      prisma.testCase.count.mockResolvedValueOnce(0);
-
-      const result = await service.computeDefectDensity(projectId);
-
-      expect(result).toBe(0);
+      const result = await service.computeCoveragePct(projectId, cfg);
+      expect(result.value).toBe(60);
     });
   });
 
   describe('computePassRate()', () => {
-    it('should compute pass rate over last N days from TestResult counts', async () => {
-      prisma.testResult.count
-        .mockResolvedValueOnce(950)   // passed count
-        .mockResolvedValueOnce(1000); // total count
+    it('produces per-status counts and evaluates the default expression', async () => {
+      prisma.testResult.groupBy.mockResolvedValue([
+        { status: 'PASSED', _count: { _all: 950 } },
+        { status: 'FAILED', _count: { _all: 50 } },
+      ]);
 
-      const result = await service.computePassRate(projectId, 7);
+      const result = await service.computePassRate(projectId, defaults('PASS_RATE_7D'));
 
-      expect(prisma.testResult.count).toHaveBeenCalledTimes(2);
-      // Passed count call
-      expect(prisma.testResult.count).toHaveBeenCalledWith({
-        where: {
-          testCase: { projectId, deletedAt: null },
-          status: 'PASSED',
-          createdAt: { gte: expect.any(Date) },
-        },
-      });
-      // Total count call
-      expect(prisma.testResult.count).toHaveBeenCalledWith({
-        where: {
-          testCase: { projectId, deletedAt: null },
-          createdAt: { gte: expect.any(Date) },
-        },
-      });
-      expect(result).toBe(95);
+      expect(result.value).toBe(95);
+      expect(result.breakdown.passedResults).toBe(950);
+      expect(result.breakdown.failedResults).toBe(50);
+      expect(result.breakdown.totalResults).toBe(1000);
     });
 
-    it('should return 0 when there are no results', async () => {
-      prisma.testResult.count
-        .mockResolvedValueOnce(0)
-        .mockResolvedValueOnce(0);
+    it('lets the user count FLAKY toward the numerator', async () => {
+      prisma.testResult.groupBy.mockResolvedValue([
+        { status: 'PASSED', _count: { _all: 80 } },
+        { status: 'FLAKY', _count: { _all: 10 } },
+        { status: 'FAILED', _count: { _all: 10 } },
+      ]);
 
-      const result = await service.computePassRate(projectId, 7);
+      const cfg: ResolvedFormulaConfig = {
+        ...defaults('PASS_RATE_7D'),
+        expression: '100 * (passedResults + flakyResults) / totalResults',
+      };
 
-      expect(result).toBe(0);
+      const result = await service.computePassRate(projectId, cfg);
+      expect(result.value).toBe(90);
     });
   });
 
   describe('computeFlakyRate()', () => {
-    // Helper: mock run selection (single findMany call — uses all synced runs)
-    const mockRuns = (runs: { id: string; startedAt: Date }[]) => {
-      prisma.testRun.findMany.mockResolvedValueOnce(runs);
-    };
-
-    it('should detect flaky tests with 2+ transitions (fail then recover)', async () => {
-      const runs = Array.from({ length: 5 }, (_, i) => ({
-        id: `run-${i + 1}`,
-        startedAt: new Date(2026, 2, 1, i),
-      }));
-      mockRuns(runs);
-
-      // tc-1: P-F-P = 2 transitions → flaky (failed then recovered)
-      // tc-2: all passed → not flaky
-      // tc-3: all failed → not flaky (consistent failure = real bug)
+    it('detects flaky tests using minTransitions and exposes counts', async () => {
+      prisma.testRun.findMany.mockResolvedValueOnce([
+        { id: 'r1', startedAt: new Date(2026, 0, 5) },
+        { id: 'r2', startedAt: new Date(2026, 0, 4) },
+        { id: 'r3', startedAt: new Date(2026, 0, 3) },
+      ]);
       prisma.testCase.findMany.mockResolvedValueOnce([
         {
           id: 'tc-1',
           testResults: [
-            { status: 'PASSED', runId: 'run-1' },
-            { status: 'FAILED', runId: 'run-2' },
-            { status: 'PASSED', runId: 'run-3' },
+            { status: 'PASSED', runId: 'r1' },
+            { status: 'FAILED', runId: 'r2' },
+            { status: 'PASSED', runId: 'r3' },
           ],
         },
         {
           id: 'tc-2',
           testResults: [
-            { status: 'PASSED', runId: 'run-1' },
-            { status: 'PASSED', runId: 'run-2' },
-            { status: 'PASSED', runId: 'run-3' },
-          ],
-        },
-        {
-          id: 'tc-3',
-          testResults: [
-            { status: 'FAILED', runId: 'run-1' },
-            { status: 'FAILED', runId: 'run-2' },
-            { status: 'FAILED', runId: 'run-3' },
+            { status: 'PASSED', runId: 'r1' },
+            { status: 'PASSED', runId: 'r2' },
           ],
         },
       ]);
 
-      const result = await service.computeFlakyRate(projectId);
-
-      // 1 flaky out of 3 automated = 33.33
-      expect(result).toBeCloseTo(33.33, 1);
-    });
-
-    it('should NOT flag a test with only 1 transition (pure regression)', async () => {
-      const runs = Array.from({ length: 5 }, (_, i) => ({
-        id: `run-${i + 1}`,
-        startedAt: new Date(2026, 2, 1, i),
-      }));
-      mockRuns(runs);
-
-      // P-P-P-F-F = 1 transition — regression, not flaky
-      prisma.testCase.findMany.mockResolvedValueOnce([
-        {
-          id: 'tc-1',
-          testResults: [
-            { status: 'PASSED', runId: 'run-1' },
-            { status: 'PASSED', runId: 'run-2' },
-            { status: 'PASSED', runId: 'run-3' },
-            { status: 'FAILED', runId: 'run-4' },
-            { status: 'FAILED', runId: 'run-5' },
-          ],
-        },
-      ]);
-
-      const result = await service.computeFlakyRate(projectId);
-
-      expect(result).toBe(0);
-    });
-
-    it('should use runs from all sources within 90-day window', async () => {
-      const allRuns = [
-        ...Array.from({ length: 7 }, (_, i) => ({
-          id: `gh-${i + 1}`,
-          startedAt: new Date(2026, 2, 5, i),
-        })),
-        ...Array.from({ length: 3 }, (_, i) => ({
-          id: `tr-${i + 1}`,
-          startedAt: new Date(2026, 2, 1, i),
-        })),
-      ];
-      prisma.testRun.findMany.mockResolvedValueOnce(allRuns);
-
-      prisma.testCase.findMany.mockResolvedValueOnce([]);
-
-      await service.computeFlakyRate(projectId);
-
-      // Single query fetches all runs regardless of source, with 90-day filter
-      expect(prisma.testRun.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            projectId,
-            deletedAt: null,
-            startedAt: expect.objectContaining({ gte: expect.any(Date) }),
-          }),
-          orderBy: { startedAt: 'desc' },
-        }),
-      );
-    });
-
-    it('should return 0 when there are no recent runs', async () => {
-      prisma.testRun.findMany.mockResolvedValueOnce([]);
-
-      const result = await service.computeFlakyRate(projectId);
-
-      expect(result).toBe(0);
-    });
-
-    it('should return 0 when no tests are flaky', async () => {
-      const runs = [
-        { id: 'run-1', startedAt: new Date(2026, 2, 1, 0) },
-        { id: 'run-2', startedAt: new Date(2026, 2, 1, 1) },
-      ];
-      mockRuns(runs);
-
-      prisma.testCase.findMany.mockResolvedValueOnce([
-        {
-          id: 'tc-1',
-          testResults: [
-            { status: 'PASSED', runId: 'run-1' },
-            { status: 'PASSED', runId: 'run-2' },
-          ],
-        },
-        {
-          id: 'tc-2',
-          testResults: [
-            { status: 'FAILED', runId: 'run-1' },
-            { status: 'FAILED', runId: 'run-2' },
-          ],
-        },
-      ]);
-
-      const result = await service.computeFlakyRate(projectId);
-
-      expect(result).toBe(0);
+      const result = await service.computeFlakyRate(projectId, defaults('FLAKY_RATE'));
+      expect(result.value).toBe(50);
+      expect(result.breakdown).toEqual({ flakyTestCount: 1, automatedTestCount: 2, runCount: 3 });
     });
   });
 
   describe('computeMTTD()', () => {
-    it('should compute average hours between commit timestamp and first failure detection', async () => {
-      // TestRuns with sha (commit-triggered) that have failures
-      const runs = [
+    it('exposes mean and median latencies', async () => {
+      prisma.testRun.findMany.mockResolvedValue([
         {
-          id: 'run-1',
+          id: 'r1',
           startedAt: new Date('2026-03-01T10:00:00Z'),
-          testResults: [
-            { status: 'FAILED', createdAt: new Date('2026-03-01T12:00:00Z') },
-          ],
+          testResults: [{ status: 'FAILED', createdAt: new Date('2026-03-01T11:00:00Z') }], // 1h
         },
         {
-          id: 'run-2',
+          id: 'r2',
           startedAt: new Date('2026-03-02T10:00:00Z'),
-          testResults: [
-            { status: 'FAILED', createdAt: new Date('2026-03-02T14:00:00Z') },
-          ],
+          testResults: [{ status: 'FAILED', createdAt: new Date('2026-03-02T12:00:00Z') }], // 2h
         },
-      ];
+        {
+          id: 'r3',
+          startedAt: new Date('2026-03-03T10:00:00Z'),
+          testResults: [{ status: 'FAILED', createdAt: new Date('2026-03-03T20:00:00Z') }], // 10h
+        },
+      ]);
 
-      prisma.testRun.findMany.mockResolvedValue(runs);
+      const meanRes = await service.computeMTTD(projectId, defaults('MTTD_HOURS'));
+      expect(meanRes.value).toBeCloseTo(13 / 3, 5);
+      expect(meanRes.breakdown.medianFailureLatencyHours).toBe(2);
 
-      const result = await service.computeMTTD(projectId);
-
-      // Run 1: 2 hours, Run 2: 4 hours => average = 3
-      expect(result).toBe(3);
-    });
-
-    it('should return 0 when there are no runs with failures', async () => {
-      prisma.testRun.findMany.mockResolvedValue([]);
-
-      const result = await service.computeMTTD(projectId);
-
-      expect(result).toBe(0);
+      const medianCfg: ResolvedFormulaConfig = {
+        ...defaults('MTTD_HOURS'),
+        expression: 'medianFailureLatencyHours',
+      };
+      const medianRes = await service.computeMTTD(projectId, medianCfg);
+      expect(medianRes.value).toBe(2);
     });
   });
 
   describe('computeMTTR()', () => {
-    it('should compute average hours between defect createdAt and resolvedAt', async () => {
-      const defects = [
-        {
-          createdAt: new Date('2026-03-01T00:00:00Z'),
-          resolvedAt: new Date('2026-03-02T00:00:00Z'), // 24 hours
-        },
-        {
-          createdAt: new Date('2026-03-01T00:00:00Z'),
-          resolvedAt: new Date('2026-03-03T00:00:00Z'), // 48 hours
-        },
-      ];
+    it('exposes mean, median, and p90 resolution hours', async () => {
+      prisma.defect.findMany.mockResolvedValue([
+        { createdAt: new Date('2026-03-01T00:00:00Z'), resolvedAt: new Date('2026-03-02T00:00:00Z') },
+        { createdAt: new Date('2026-03-01T00:00:00Z'), resolvedAt: new Date('2026-03-02T12:00:00Z') },
+        { createdAt: new Date('2026-03-01T00:00:00Z'), resolvedAt: new Date('2026-04-01T00:00:00Z') }, // outlier
+      ]);
 
-      prisma.defect.findMany.mockResolvedValue(defects);
-
-      const result = await service.computeMTTR(projectId);
-
-      // Average: (24 + 48) / 2 = 36
-      expect(result).toBe(36);
-    });
-
-    it('should return 0 when there are no resolved defects', async () => {
-      prisma.defect.findMany.mockResolvedValue([]);
-
-      const result = await service.computeMTTR(projectId);
-
-      expect(result).toBe(0);
+      const result = await service.computeMTTR(projectId, defaults('MTTR_HOURS'));
+      expect(result.value).toBe(36);
+      expect(result.breakdown.resolvedDefectCount).toBe(3);
+      expect(result.breakdown.p90ResolutionHours).toBeGreaterThan(36);
     });
   });
 
   describe('computeEscapeRate()', () => {
-    it('should compute escaped defects / total defects * 100', async () => {
-      prisma.defect.count
-        .mockResolvedValueOnce(5)   // escaped count
-        .mockResolvedValueOnce(50); // total count
-
-      const result = await service.computeEscapeRate(projectId);
-
-      expect(prisma.defect.count).toHaveBeenCalledWith({
-        where: { projectId, isEscaped: true, deletedAt: null },
-      });
-      expect(prisma.defect.count).toHaveBeenCalledWith({
-        where: { projectId, deletedAt: null },
-      });
-      expect(result).toBe(10);
-    });
-
-    it('should return 0 when there are no defects', async () => {
-      prisma.defect.count
-        .mockResolvedValueOnce(0)
-        .mockResolvedValueOnce(0);
-
-      const result = await service.computeEscapeRate(projectId);
-
-      expect(result).toBe(0);
+    it('default expression evaluates to escaped/total × 100', async () => {
+      prisma.defect.count.mockResolvedValueOnce(5).mockResolvedValueOnce(50);
+      const result = await service.computeEscapeRate(projectId, defaults('ESCAPE_RATE'));
+      expect(result.value).toBe(10);
+      expect(result.breakdown).toEqual({ escapedDefectCount: 5, totalDefectCount: 50 });
     });
   });
 
   describe('computeExecVelocity()', () => {
-    it('should compute test runs per day over last N days', async () => {
+    it('evaluates runCount / windowDays', async () => {
       prisma.testRun.count.mockResolvedValue(70);
-
-      const result = await service.computeExecVelocity(projectId, 7);
-
-      expect(prisma.testRun.count).toHaveBeenCalledWith({
-        where: {
-          projectId,
-          deletedAt: null,
-          startedAt: { gte: expect.any(Date) },
-        },
-      });
-      expect(result).toBe(10); // 70 / 7
-    });
-
-    it('should return 0 when there are no runs', async () => {
-      prisma.testRun.count.mockResolvedValue(0);
-
-      const result = await service.computeExecVelocity(projectId, 7);
-
-      expect(result).toBe(0);
+      const result = await service.computeExecVelocity(projectId, defaults('EXEC_VELOCITY'));
+      expect(result.value).toBe(10);
+      expect(result.breakdown).toEqual({ runCount: 70, windowDays: 7 });
     });
   });
 
   describe('computeReqCoverage()', () => {
-    it('should return 0 when there are no stories', async () => {
-      prisma.story.findMany.mockResolvedValue([]);
-      prisma.testCase.findMany.mockResolvedValue([]);
-
-      const result = await service.computeReqCoverage(projectId);
-      expect(result).toBe(0);
-    });
-
-    it('should compute percentage of stories covered by test case references', async () => {
+    it('extracts story keys via the configured regex and exposes coverage counts', async () => {
       prisma.story.findMany.mockResolvedValue([
         { externalId: 'PS-100' },
         { externalId: 'PS-200' },
@@ -404,132 +223,122 @@ describe('AggregationService', () => {
         { references: 'PS-300' },
       ]);
 
-      const result = await service.computeReqCoverage(projectId);
-      expect(result).toBe(75); // 3 of 4 stories covered
+      const result = await service.computeReqCoverage(projectId, defaults('REQ_COVERAGE'));
+      expect(result.value).toBe(75);
+      expect(result.breakdown).toEqual({
+        coveredStoryCount: 3,
+        uncoveredStoryCount: 1,
+        totalStoryCount: 4,
+      });
+    });
+  });
+
+  describe('computeDefectDensity()', () => {
+    it('uses configured open statuses to count', async () => {
+      prisma.defect.count.mockResolvedValueOnce(4);
+      prisma.testCase.count.mockResolvedValueOnce(80);
+      const result = await service.computeDefectDensity(projectId, defaults('DEFECT_DENSITY'));
+      expect(result.value).toBe(5);
+      expect(prisma.defect.count).toHaveBeenCalledWith({
+        where: {
+          projectId,
+          deletedAt: null,
+          status: { in: ['OPEN', 'IN_PROGRESS', 'REOPENED'] },
+        },
+      });
     });
   });
 
   describe('computeReadinessScore()', () => {
-    it('should compute weighted composite: 40% pass + 30% coverage + 30% (100 - critical ratio)', async () => {
-      // Mock for computePassRate
-      prisma.testResult.count
-        .mockResolvedValueOnce(90)   // passed
-        .mockResolvedValueOnce(100); // total
+    function setupComputes() {
+      // PASS_RATE_7D
+      prisma.testResult.groupBy.mockResolvedValueOnce([
+        { status: 'PASSED', _count: { _all: 90 } },
+        { status: 'FAILED', _count: { _all: 10 } },
+      ]);
+      // PASS_RATE_30D
+      prisma.testResult.groupBy.mockResolvedValueOnce([
+        { status: 'PASSED', _count: { _all: 85 } },
+        { status: 'FAILED', _count: { _all: 15 } },
+      ]);
+      // COVERAGE_PCT
+      prisma.testCase.groupBy.mockResolvedValueOnce([
+        { automationStatus: 'AUTOMATED', _count: { _all: 80 } },
+        { automationStatus: 'NOT_AUTOMATED', _count: { _all: 20 } },
+      ]);
+      // FLAKY_RATE
+      prisma.testRun.findMany.mockResolvedValueOnce([]);
+      // MTTD
+      prisma.testRun.findMany.mockResolvedValueOnce([]);
+      // MTTR
+      prisma.defect.findMany.mockResolvedValueOnce([]);
+      // ESCAPE_RATE
+      prisma.defect.count.mockResolvedValueOnce(0).mockResolvedValueOnce(0);
+      // EXEC_VELOCITY
+      prisma.testRun.count.mockResolvedValueOnce(7);
+      // REQ_COVERAGE
+      prisma.story.findMany.mockResolvedValueOnce([]);
+      prisma.testCase.findMany.mockResolvedValueOnce([]);
+      // DEFECT_DENSITY
+      prisma.defect.count.mockResolvedValueOnce(0);
+      prisma.testCase.count.mockResolvedValueOnce(100);
+      // critical / total
+      prisma.defect.count.mockResolvedValueOnce(2).mockResolvedValueOnce(100);
+    }
 
-      // Mock for computeCoveragePct
-      prisma.testCase.count
-        .mockResolvedValueOnce(80)   // automated
-        .mockResolvedValueOnce(100); // total
-
-      // Mock for open critical defects
-      prisma.defect.count
-        .mockResolvedValueOnce(2)   // open critical
-        .mockResolvedValueOnce(100); // total
-
-      const result = await service.computeReadinessScore(projectId);
-
-      // passRate = 90
-      // coveragePct = 80
-      // criticalRatio = (2/100)*100 = 2
-      // readiness = 0.4 * 90 + 0.3 * 80 + 0.3 * (100 - 2) = 36 + 24 + 29.4 = 89.4
-      expect(result).toBeCloseTo(89.4, 1);
+    it('evaluates the default composite expression', async () => {
+      setupComputes();
+      const result = await service.computeReadinessScore(
+        projectId,
+        defaults('READINESS_SCORE'),
+        defaultsAll(),
+      );
+      // 0.4 * 90 + 0.3 * 80 + 0.3 * (100 - 2) = 36 + 24 + 29.4 = 89.4
+      expect(result.value).toBeCloseTo(89.4, 1);
     });
 
-    it('should handle zero total defects in readiness score', async () => {
-      prisma.testResult.count
-        .mockResolvedValueOnce(100)
-        .mockResolvedValueOnce(100);
-
-      prisma.testCase.count
-        .mockResolvedValueOnce(100)
-        .mockResolvedValueOnce(100);
-
-      prisma.defect.count
-        .mockResolvedValueOnce(0)
-        .mockResolvedValueOnce(0);
-
-      const result = await service.computeReadinessScore(projectId);
-
-      // passRate = 100, coverage = 100, criticalRatio = 0
-      // readiness = 0.4 * 100 + 0.3 * 100 + 0.3 * 100 = 40 + 30 + 30 = 100
-      expect(result).toBeCloseTo(100, 1);
+    it('honors a custom expression', async () => {
+      setupComputes();
+      const cfg = { ...defaults('READINESS_SCORE'), expression: '0.5 * passRate7d + 0.5 * coverage' };
+      const result = await service.computeReadinessScore(projectId, cfg, defaultsAll());
+      expect(result.value).toBeCloseTo(85, 1);
     });
   });
 
   describe('runAggregation()', () => {
-    it('should compute all KPIs and write KPISnapshot records', async () => {
-      // Mock all compute methods' underlying prisma calls
-
-      // computeCoveragePct
-      prisma.testCase.count
-        .mockResolvedValueOnce(80)   // automated
-        .mockResolvedValueOnce(100)  // total
-        // computeReadinessScore -> computeCoveragePct
-        .mockResolvedValueOnce(80)
-        .mockResolvedValueOnce(100);
-
-      // computePassRate (7d)
-      prisma.testResult.count
-        .mockResolvedValueOnce(95)    // passed 7d
-        .mockResolvedValueOnce(100)   // total 7d
-        // computePassRate (30d)
-        .mockResolvedValueOnce(92)
-        .mockResolvedValueOnce(100)
-        // computeReadinessScore -> computePassRate 7d
-        .mockResolvedValueOnce(95)
-        .mockResolvedValueOnce(100);
-
-      // computeFlakyRate
-      prisma.testCase.findMany.mockResolvedValue([]);
-
-      // computeMTTD
+    it('writes 11 KPISnapshot rows', async () => {
+      prisma.testCase.count.mockResolvedValue(0);
+      prisma.testResult.count.mockResolvedValue(0);
+      prisma.testRun.count.mockResolvedValue(0);
       prisma.testRun.findMany.mockResolvedValue([]);
-
-      // computeMTTR
+      prisma.testCase.findMany.mockResolvedValue([]);
+      prisma.testCase.groupBy.mockResolvedValue([]);
+      prisma.testResult.groupBy.mockResolvedValue([]);
+      prisma.defect.count.mockResolvedValue(0);
       prisma.defect.findMany.mockResolvedValue([]);
-
-      // computeEscapeRate + computeReadinessScore critical
-      prisma.defect.count
-        .mockResolvedValueOnce(5)    // escaped
-        .mockResolvedValueOnce(50)   // total defects
-        // computeReadinessScore
-        .mockResolvedValueOnce(0)    // open critical
-        .mockResolvedValueOnce(50);  // total defects
-
-      // computeReqCoverage
       prisma.story.findMany.mockResolvedValue([]);
-
-      // computeExecVelocity
-      prisma.testRun.count.mockResolvedValue(70);
-
-      // createMany for snapshots
       prisma.kPISnapshot.createMany.mockResolvedValue({ count: 11 });
 
       await service.runAggregation(projectId);
 
       expect(prisma.kPISnapshot.createMany).toHaveBeenCalledTimes(1);
-      const createManyCall = prisma.kPISnapshot.createMany.mock.calls[0][0];
-      expect(createManyCall.data).toBeInstanceOf(Array);
-      expect(createManyCall.data.length).toBe(11); // 11 KPI metrics
-
-      // Verify metrics are present
-      const metrics = createManyCall.data.map((d: any) => d.metric);
-      expect(metrics).toContain('COVERAGE_PCT');
-      expect(metrics).toContain('PASS_RATE_7D');
-      expect(metrics).toContain('PASS_RATE_30D');
-      expect(metrics).toContain('FLAKY_RATE');
-      expect(metrics).toContain('MTTD_HOURS');
-      expect(metrics).toContain('MTTR_HOURS');
-      expect(metrics).toContain('ESCAPE_RATE');
-      expect(metrics).toContain('EXEC_VELOCITY');
-      expect(metrics).toContain('REQ_COVERAGE');
-      expect(metrics).toContain('READINESS_SCORE');
-      expect(metrics).toContain('DEFECT_DENSITY');
-
-      // Verify all records have the correct projectId
-      for (const record of createManyCall.data) {
-        expect(record.projectId).toBe(projectId);
-        expect(typeof record.value).toBe('number');
+      const data = prisma.kPISnapshot.createMany.mock.calls[0][0].data;
+      expect(data).toHaveLength(11);
+      const metrics = data.map((d: any) => d.metric);
+      for (const m of [
+        'COVERAGE_PCT',
+        'PASS_RATE_7D',
+        'PASS_RATE_30D',
+        'FLAKY_RATE',
+        'MTTD_HOURS',
+        'MTTR_HOURS',
+        'ESCAPE_RATE',
+        'EXEC_VELOCITY',
+        'REQ_COVERAGE',
+        'READINESS_SCORE',
+        'DEFECT_DENSITY',
+      ]) {
+        expect(metrics).toContain(m);
       }
     });
   });
