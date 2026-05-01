@@ -6,7 +6,9 @@
 
 **Revision 2 (post-Codex round 1)** — added: bespoke tables (`users/page.tsx`, `alerts/page.tsx` ×2) and `Tabs` overflow folded into Phase 2; new shared `Dialog`/`Sheet` primitive in Phase 1 (existing `UserSettingsDialog` has no focus trap / scroll lock / focus restoration — confirmed); `getRowKey` shipped alongside `mobileCard` on `DataTable`; iOS auto-zoom audit corrected — `text-sm` inputs in `user-settings-dialog.tsx:9-10` and `select.tsx:32-39` are real and need bumping to `text-base` on `<sm`.
 
-**Revision 3 (post-Codex round 2 — final)** — Users mobile-card action layout pinned down (per-row Edit / Regenerate password / Block-Unblock / Delete actions at `users/page.tsx:795-835`); `Dialog`/`Sheet` primitive scope hardened with portal mounting (cites `notification-bell.tsx:86` z-index conflict and `users/page.tsx:736` `overflow-hidden` clip risk) and explicit `aria-labelledby` / `aria-describedby` wiring via `DialogTitle` / `DialogDescription` slots; `getRowKey` promoted to a global `DataTable` requirement — only **3** `<DataTable>` callsites today (all in `runs/page.tsx`, lines 315 / 514 / 629), so the migration cost is trivial; focus-restoration safety added (no-op if trigger has unmounted during route change).
+**Revision 3 (post-Codex round 2)** — Users mobile-card action layout pinned down (per-row Edit / Regenerate password / Block-Unblock / Delete actions at `users/page.tsx:795-835`); `Dialog`/`Sheet` primitive scope hardened with portal mounting (cites `notification-bell.tsx:86` z-index conflict and `users/page.tsx:736` `overflow-hidden` clip risk) and explicit `aria-labelledby` / `aria-describedby` wiring via `DialogTitle` / `DialogDescription` slots; `getRowKey` promoted to a global `DataTable` requirement; focus-restoration safety added (no-op if trigger has unmounted during route change).
+
+**Revision 4 (post-Codex round 3 — final)** — `<DataTable>` callsite inventory corrected from **3** to **5**: Runs ×3 (`runs/page.tsx:315,514,629`) and **Coverage ×2** (`coverage/page.tsx:471` test cases, `:532` stories) which the previous count missed. Both Coverage tables are added to Phase 2 for required `getRowKey` migration **and** for `mobileCard` treatment — these are the test case and stories drill-down lists from the README's "Test Coverage" module, central to mobile usability, not desktop-only.
 
 ---
 
@@ -69,7 +71,7 @@ The dashboard's job on a phone is **glanceable status + drill-down**, not data e
 ### 2.4 Component-level patterns
 
 - **DataTable (`components/ui/data-table.tsx`)** gains two related changes:
-  - `getRowKey: (row: T, idx: number) => string` — **required on every callsite**, not only when `mobileCard` is set. There are only 3 `<DataTable>` callsites in the repo today (`runs/page.tsx:315,514,629`), so making row identity explicit everywhere is cheaper than carrying a TS conditional and removes the index-key brittleness on desktop too. Default sort already mutates row order (`data-table.tsx:71-91`), so this is a real correctness win independent of mobile.
+  - `getRowKey: (row: T, idx: number) => string` — **required on every callsite**, not only when `mobileCard` is set. There are 5 `<DataTable>` callsites in the repo today — `runs/page.tsx:315,514,629` and `coverage/page.tsx:471,532` — all migrated in the same commit as the API change. Making row identity explicit everywhere is cheaper than carrying a TS conditional and removes the index-key brittleness on desktop too. Default sort already mutates row order (`data-table.tsx:71-91`), so this is a real correctness win independent of mobile.
   - `mobileCard?: (row: T) => ReactNode` — optional render. When set, on `<md` the component renders `<ul>` of cards (using a `hidden md:block` table + `md:hidden` list pair), driven by the same `data` and the same `getRowKey`. Default fallback on `<md` (no `mobileCard`) is "first 2 columns visible, rest collapsed under an expand chevron".
 - **Bespoke tables** (`users/page.tsx`, `alerts/page.tsx`) — two paths:
   - **Users → migrate to `DataTable`.** Each row has 4 inline action buttons today (Edit / Regenerate password / Block-Unblock / Delete at `users/page.tsx:795-835`), so the migration ships an explicit mobile card layout for actions, not just metadata:
@@ -122,10 +124,13 @@ Acceptance: at 375 px, app is navigable, no horizontal page scroll, every page r
 ### Phase 2 — Tables, tabs & charts (Day 2, ~1¼ days)
 
 1. Extend `DataTable`:
-   - Add `getRowKey: (row: T, idx: number) => string` as a **required** prop on every callsite (3 in the repo today, all in `runs/page.tsx`). Migrate the existing 3 callsites in the same commit.
-   - Add optional `mobileCard?: (row: T) => ReactNode`. When set, render `<ul>` on `<md` (using a `hidden md:block` table + `md:hidden` list pair). Default desktop behaviour unchanged.
-2. Provide `mobileCard` for the `DataTable` callsites that need it (`runs/page.tsx`) plus the per-test execution lists rendered through it.
-   - Card shape: top row = primary identifier (run name / test name) + status badge; secondary row = 2–3 metadata pills; tap opens existing detail view.
+   - Add `getRowKey: (row: T, idx: number) => string` as a **required** prop on every callsite. Migrate **all 5 existing callsites in the same commit**: `runs/page.tsx:315,514,629` (test runs / pipeline runs / flaky tests) and `coverage/page.tsx:471,532` (test cases / stories). Each callsite supplies an `id`-based key.
+   - Add optional `mobileCard?: (row: T) => ReactNode`. When set, render `<ul>` on `<md` (using a `hidden md:block` table + `md:hidden` list pair) driven by the same `data` and the same `getRowKey`. Default desktop behaviour unchanged.
+2. Provide `mobileCard` for **all five `<DataTable>` callsites** plus the per-test execution lists rendered through it. The Coverage tables (test cases at `:471`, stories at `:532`) are central to the "Test Coverage" module and are not desktop-only.
+   - **Runs / Pipeline runs:** top = run name + status badge; secondary = branch / trigger / duration pills; tap opens existing detail view.
+   - **Flaky tests:** top = test name + flakiness score badge; secondary = pass/fail counts, last-failure timestamp.
+   - **Coverage test cases:** top = test name + automation badge; secondary = suite / type / last-run status; tap opens the existing test-history side-drawer (which itself becomes a bottom sheet on `<sm` in Phase 3).
+   - **Coverage stories:** top = story title + status badge; secondary = points / assignee / component pills; tap follows existing row behaviour.
 3. **Bespoke tables** — parallel sub-task in the same phase:
    - `users/page.tsx:737` — migrate onto `DataTable`, provide `mobileCard` with the action layout described in §2.4 (3 inline 44×44 actions + overflow `⋯` menu for Regenerate password). Self-row hides Block / Delete (existing condition at `users/page.tsx:811`).
    - `alerts/page.tsx:245` (rules) and `:630` (history) — keep markup, add sibling `md:hidden` card lists driven by the same data; lists keyed by `rule.id` / `event.id`. Visual matches the shared `mobileCard` cards.
@@ -181,8 +186,8 @@ Acceptance: full UX pass on iPhone 16, Pixel 8, iPhone SE (375), and Galaxy Fold
 | Phase | Files touched | Net new code |
 |---|---|---|
 | 1 | 4 layout files + new `dialog.tsx` primitive (~150 LOC, portal + a11y) + `user-settings-dialog.tsx` migration + ~12 page files (sweep) | ~310 LOC |
-| 2 | `data-table.tsx` + 3 `<DataTable>` callsites (required `getRowKey`), `tabs.tsx`, `runs/page.tsx` mobile cards, bespoke tables (`users/page.tsx` migration, `alerts/page.tsx` parallel cards) + 5 chart wrappers | ~400 LOC |
+| 2 | `data-table.tsx` + 5 `<DataTable>` callsites (`runs/page.tsx`, `coverage/page.tsx`) for required `getRowKey` and `mobileCard`, `tabs.tsx`, bespoke tables (`users/page.tsx` migration, `alerts/page.tsx` parallel cards) + 5 chart wrappers | ~450 LOC |
 | 3 | `header.tsx`, `test-history-drawer.tsx`, formula configurator, iOS input audit (~3–5 form/select files) | ~180 LOC |
 | 4 | 1 new e2e spec + screenshot baselines | ~80 LOC |
 
-Total: ~970 LOC of additive Tailwind/JSX changes plus one new ~150 LOC `Dialog`/`Sheet` primitive, zero deletions on desktop classes.
+Total: ~1020 LOC of additive Tailwind/JSX changes plus one new ~150 LOC `Dialog`/`Sheet` primitive, zero deletions on desktop classes.
