@@ -430,7 +430,7 @@ export default function DefectsPage() {
           </h3>
 
           {/* Timing stat cards */}
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <StatCard
               title="Avg MTTD"
               value={formatMTTR(mttdHours)}
@@ -580,7 +580,7 @@ export default function DefectsPage() {
       )}
 
       {/* ── Summary Cards ─────────────────────────────────────────── */}
-      <div className={cn('grid grid-cols-2 gap-3 lg:grid-cols-4', statsFetching && 'animate-pulse')}>
+      <div className={cn('grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4', statsFetching && 'animate-pulse')}>
         <StatCard
           title="Total Open Defects"
           value={openCount}

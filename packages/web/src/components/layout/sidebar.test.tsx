@@ -19,19 +19,19 @@ describe('Sidebar', () => {
 
   it('renders Users nav item when isAdmin is true', () => {
     mockUseAuth.mockReturnValue({ isAdmin: true });
-    render(<Sidebar collapsed={false} onToggle={() => {}} />);
+    render(<Sidebar collapsed={false} onToggle={() => {}} mobileOpen={false} onMobileClose={() => {}} />);
     expect(screen.getByText('Users')).toBeInTheDocument();
   });
 
   it('does NOT render Users nav item when isAdmin is false', () => {
     mockUseAuth.mockReturnValue({ isAdmin: false });
-    render(<Sidebar collapsed={false} onToggle={() => {}} />);
+    render(<Sidebar collapsed={false} onToggle={() => {}} mobileOpen={false} onMobileClose={() => {}} />);
     expect(screen.queryByText('Users')).not.toBeInTheDocument();
   });
 
   it('always renders Overview and Projects nav items regardless of role', () => {
     mockUseAuth.mockReturnValue({ isAdmin: false });
-    render(<Sidebar collapsed={false} onToggle={() => {}} />);
+    render(<Sidebar collapsed={false} onToggle={() => {}} mobileOpen={false} onMobileClose={() => {}} />);
     expect(screen.getByText('Overview')).toBeInTheDocument();
     expect(screen.getByText('Projects')).toBeInTheDocument();
   });

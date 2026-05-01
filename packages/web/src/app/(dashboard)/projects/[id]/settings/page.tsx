@@ -465,7 +465,7 @@ function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; rea
               />
               <p className="mt-1 text-[11px] text-muted">Filter to a specific workflow file. Leave empty to import all workflows.</p>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
                 <label className="block text-xs font-medium text-secondary mb-1.5">Branch (optional)</label>
                 <input
@@ -635,7 +635,7 @@ function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; rea
             )}
             {newConnector.type === 'jira_stories' && (
               <>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <label className="block text-xs font-medium text-secondary mb-1.5">Story Issue Type</label>
                     <input
@@ -968,7 +968,7 @@ function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; rea
                 {/* Sync Schedule */}
                 <div className="border-t border-qod-border pt-4">
                   <label className="block text-xs font-medium text-secondary mb-1.5">Sync Schedule</label>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <Select
                       options={SCHEDULE_PRESETS}
                       value={newConnector.schedule}
