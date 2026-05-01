@@ -1,0 +1,119 @@
+name: Deploy to Test
+
+# Manual deploy to the QOD test environment. The repo's documented deploy
+# method is Docker Compose (`deploy/docker-compose`), so this workflow rsyncs
+# the working tree to the test host and rebuilds the stack there.
+#
+# All targeting / credentials live in repository secrets and the `test`
+# environment. The workflow file ships parametric — fill these in before the
+# first run:
+#
+#   secrets:
+#     TEST_SSH_HOST       — DNS or IP of the test box
+#     TEST_SSH_USER       — login user on the test box
+#     TEST_SSH_KEY        — private key (PEM) authorized on the test box
+#     TEST_DEPLOY_PATH    — directory on the test box that holds the repo
+#                           checkout (e.g. /opt/qod)
+#     TEST_SSH_PORT       — optional, defaults to 22
+#
+#   environment vars (under the `test` environment):
+#     TEST_URL            — public URL used by the post-deploy health check
+#                           (probed against /api/v1/health)
+#
+# Once those are set, the deploy can be triggered from the Actions UI or via
+# `gh workflow run deploy-test.yml -f ref=feat/mobile-ui-phase-1`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag, or commit to deploy'
+        required: true
+        default: 'main'
+
+concurrency:
+  group: deploy-test
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.ref }} to test
+    runs-on: ubuntu-latest
+    environment:
+      name: test
+      url: ${{ vars.TEST_URL }}
+
+    steps:
+      - name: Check out ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.TEST_SSH_KEY }}
+          SSH_HOST: ${{ secrets.TEST_SSH_HOST }}
+          SSH_PORT: ${{ secrets.TEST_SSH_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync repo to test host
+        env:
+          SSH_HOST: ${{ secrets.TEST_SSH_HOST }}
+          SSH_USER: ${{ secrets.TEST_SSH_USER }}
+          SSH_PORT: ${{ secrets.TEST_SSH_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.TEST_DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          rsync -az --delete \
+            --exclude='.git/' \
+            --exclude='node_modules/' \
+            --exclude='packages/*/node_modules/' \
+            --exclude='packages/*/dist/' \
+            --exclude='packages/*/.next/' \
+            --exclude='**/coverage/' \
+            -e "ssh -i ~/.ssh/deploy_key -p $SSH_PORT" \
+            ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+
+      - name: Rebuild and restart Docker Compose stack
+        env:
+          SSH_HOST: ${{ secrets.TEST_SSH_HOST }}
+          SSH_USER: ${{ secrets.TEST_SSH_USER }}
+          SSH_PORT: ${{ secrets.TEST_SSH_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.TEST_DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "cd '$DEPLOY_PATH/deploy/docker-compose' \
+             && docker compose pull --ignore-pull-failures \
+             && docker compose up --build -d \
+             && docker compose ps"
+
+      - name: Wait for /api/v1/health
+        env:
+          TEST_URL: ${{ vars.TEST_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TEST_URL" ]; then
+            echo "TEST_URL variable not configured for the 'test' environment; skipping health check."
+            exit 0
+          fi
+          for attempt in $(seq 1 30); do
+            if curl -fsSL --max-time 5 "$TEST_URL/api/v1/health" >/dev/null; then
+              echo "Test environment healthy after $attempt attempt(s): $TEST_URL"
+              exit 0
+            fi
+            echo "Attempt $attempt/30 failed; retrying in 5s..."
+            sleep 5
+          done
+          echo "Health check did not pass within 150s." >&2
+          exit 1
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
