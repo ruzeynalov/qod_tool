@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, type ReactNode } from 'react';
-import { Sidebar } from './sidebar';
+import { Sidebar, MobileNav } from './sidebar';
 import { Header } from './header';
 import { cn } from '@/lib/utils/cn';
 
@@ -18,9 +18,8 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
       <Sidebar
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
-        mobileOpen={mobileOpen}
-        onMobileClose={() => setMobileOpen(false)}
       />
+      <MobileNav open={mobileOpen} onClose={() => setMobileOpen(false)} />
 
       <div
         className={cn(

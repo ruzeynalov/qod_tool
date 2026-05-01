@@ -40,17 +40,75 @@ interface DialogContextValue {
 
 const DialogContext = createContext<DialogContextValue | null>(null);
 
-let lockCount = 0;
+// ---------------------------------------------------------------------------
+// Module-level helpers — body scroll lock and inert background. Refcounted so
+// stacked dialogs cooperate.
+// ---------------------------------------------------------------------------
+
+let scrollLockCount = 0;
 function lockBodyScroll() {
-  if (lockCount === 0) {
-    document.documentElement.style.overflow = 'hidden';
-  }
-  lockCount += 1;
+  if (scrollLockCount === 0) document.documentElement.style.overflow = 'hidden';
+  scrollLockCount += 1;
 }
 function unlockBodyScroll() {
-  lockCount = Math.max(0, lockCount - 1);
-  if (lockCount === 0) {
-    document.documentElement.style.overflow = '';
+  scrollLockCount = Math.max(0, scrollLockCount - 1);
+  if (scrollLockCount === 0) document.documentElement.style.overflow = '';
+}
+
+const inertCounts = new WeakMap<HTMLElement, number>();
+const inertOriginals = new WeakMap<
+  HTMLElement,
+  { inert: boolean; ariaHidden: string | null }
+>();
+
+/**
+ * Mark every direct child of <body> except the portal root as inert and
+ * aria-hidden so screen readers and keyboard navigation can't reach background
+ * content while a modal is open. Refcounted per-element so stacked dialogs
+ * don't undo each other.
+ */
+function applyInertBackground(container: HTMLElement): HTMLElement[] {
+  // Walk up to the direct child of <body> that contains the dialog. That's the
+  // portal wrapper we mounted; everything else under <body> is background.
+  let portalRoot: HTMLElement | null = container;
+  while (portalRoot && portalRoot.parentElement !== document.body) {
+    portalRoot = portalRoot.parentElement;
+  }
+  if (!portalRoot) return [];
+
+  const siblings = Array.from(document.body.children).filter(
+    (el): el is HTMLElement => el instanceof HTMLElement && el !== portalRoot,
+  );
+  for (const el of siblings) {
+    const count = inertCounts.get(el) ?? 0;
+    if (count === 0) {
+      inertOriginals.set(el, {
+        inert: el.inert,
+        ariaHidden: el.getAttribute('aria-hidden'),
+      });
+      el.inert = true;
+      el.setAttribute('aria-hidden', 'true');
+    }
+    inertCounts.set(el, count + 1);
+  }
+  return siblings;
+}
+
+function releaseInertBackground(siblings: HTMLElement[]) {
+  for (const el of siblings) {
+    const count = inertCounts.get(el) ?? 0;
+    if (count <= 1) {
+      inertCounts.delete(el);
+      const orig = inertOriginals.get(el);
+      if (orig) {
+        el.inert = orig.inert;
+        if (orig.ariaHidden === null) el.removeAttribute('aria-hidden');
+        else el.setAttribute('aria-hidden', orig.ariaHidden);
+        inertOriginals.delete(el);
+      }
+    } else {
+      inertCounts.set(el, count - 1);
+    }
   }
 }
 
@@ -69,33 +127,44 @@ function getFocusable(root: HTMLElement): HTMLElement[] {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Shared shell hook used by both Dialog and Sheet.
+// ---------------------------------------------------------------------------
+
 function useDialogShell(open: boolean, onClose: () => void, closeOnEsc: boolean) {
+  // SSR-safe gate: only mount the portal once we're on the client.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  const active = open && mounted;
+
   const containerRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLElement | null>(null);
   const titleId = useId();
   const descriptionId = useId();
   const hasTitleRef = useRef(false);
-  const hasDescriptionRef = useRef(false);
 
-  // Capture the element that had focus when the dialog opened, so we can restore later.
+  // Capture the element that had focus when the dialog opened.
   useLayoutEffect(() => {
-    if (open) {
-      triggerRef.current = (document.activeElement as HTMLElement) ?? null;
-    }
+    if (open) triggerRef.current = (document.activeElement as HTMLElement) ?? null;
   }, [open]);
 
   // Body scroll lock for the lifetime of the open state.
   useEffect(() => {
-    if (!open) return;
+    if (!active) return;
     lockBodyScroll();
     return unlockBodyScroll;
-  }, [open]);
+  }, [active]);
 
-  // Initial focus + focus trap + restoration.
+  // Inert background, focus trap, initial focus, restore-on-close. All in one
+  // effect so they share the lifetime — and so containerRef.current is
+  // guaranteed to be attached because we only render the portal subtree (and
+  // therefore the ref) when `active` is true, and useEffect runs after commit.
   useEffect(() => {
-    if (!open) return;
+    if (!active) return;
     const container = containerRef.current;
     if (!container) return;
+
+    const inertedSiblings = applyInertBackground(container);
 
     const initial =
       container.querySelector<HTMLElement>('[data-autofocus]') ??
@@ -117,11 +186,11 @@ function useDialogShell(open: boolean, onClose: () => void, closeOnEsc: boolean)
       }
       const first = focusables[0];
       const last = focusables[focusables.length - 1];
-      const active = document.activeElement as HTMLElement | null;
-      if (e.shiftKey && active === first) {
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && activeEl === first) {
         e.preventDefault();
         last.focus();
-      } else if (!e.shiftKey && active === last) {
+      } else if (!e.shiftKey && activeEl === last) {
         e.preventDefault();
         first.focus();
       }
@@ -130,23 +199,24 @@ function useDialogShell(open: boolean, onClose: () => void, closeOnEsc: boolean)
     document.addEventListener('keydown', handleKey);
     return () => {
       document.removeEventListener('keydown', handleKey);
+      releaseInertBackground(inertedSiblings);
       const trigger = triggerRef.current;
       if (trigger && document.contains(trigger) && typeof trigger.focus === 'function') {
         trigger.focus({ preventScroll: true });
       } else {
         if (trigger && process.env.NODE_ENV !== 'production') {
 
-          console.warn('[Dialog] Trigger element unmounted while dialog was open; focus not restored.');
+          console.warn(
+            '[Dialog] Trigger element unmounted while dialog was open; focus not restored.',
+          );
         }
-        // Fall back to body so focus does not get trapped on the removed portal.
-        (document.body as HTMLElement).focus?.({ preventScroll: true });
       }
     };
-  }, [open, onClose, closeOnEsc]);
+  }, [active, onClose, closeOnEsc]);
 
   // Dev-only warning if no DialogTitle was rendered (after first paint).
   useEffect(() => {
-    if (!open) return;
+    if (!active) return;
     if (process.env.NODE_ENV === 'production') return;
     const id = window.setTimeout(() => {
       if (!hasTitleRef.current) {
@@ -157,7 +227,7 @@ function useDialogShell(open: boolean, onClose: () => void, closeOnEsc: boolean)
       }
     }, 0);
     return () => window.clearTimeout(id);
-  }, [open]);
+  }, [active]);
 
   const ctx = useMemo<DialogContextValue>(
     () => ({
@@ -167,21 +237,18 @@ function useDialogShell(open: boolean, onClose: () => void, closeOnEsc: boolean)
         hasTitleRef.current = true;
       },
       registerDescription: () => {
-        hasDescriptionRef.current = true;
+        // Tracked for parity with title; no warning attached.
       },
     }),
     [titleId, descriptionId],
   );
 
-  return { containerRef, ctx };
+  return { containerRef, ctx, active };
 }
 
-function Portal({ children }: { children: ReactNode }) {
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
-  if (!mounted) return null;
-  return createPortal(children, document.body);
-}
+// ---------------------------------------------------------------------------
+// Public components
+// ---------------------------------------------------------------------------
 
 export function Dialog({
   open,
@@ -192,33 +259,32 @@ export function Dialog({
   closeOnEsc = true,
   ariaLabel,
 }: DialogProps) {
-  const { containerRef, ctx } = useDialogShell(open, onClose, closeOnEsc);
-  if (!open) return null;
-  return (
-    <Portal>
+  const { containerRef, ctx, active } = useDialogShell(open, onClose, closeOnEsc);
+  if (!active) return null;
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-4"
+      onMouseDown={(e) => {
+        if (closeOnBackdrop && e.target === e.currentTarget) onClose();
+      }}
+    >
       <div
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-4"
-        onMouseDown={(e) => {
-          if (closeOnBackdrop && e.target === e.currentTarget) onClose();
-        }}
+        ref={containerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={ctx.titleId}
+        aria-describedby={ctx.descriptionId}
+        aria-label={ariaLabel}
+        tabIndex={-1}
+        className={cn(
+          'w-full max-w-lg max-h-[calc(100dvh-1rem)] overflow-y-auto rounded-lg border border-qod-border bg-qod-surface shadow-2xl outline-none',
+          className,
+        )}
       >
-        <div
-          ref={containerRef}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby={ctx.titleId}
-          aria-describedby={ctx.descriptionId}
-          aria-label={ariaLabel}
-          tabIndex={-1}
-          className={cn(
-            'w-full max-w-lg max-h-[calc(100dvh-1rem)] overflow-y-auto rounded-lg border border-qod-border bg-qod-surface shadow-2xl outline-none',
-            className,
-          )}
-        >
-          <DialogContext.Provider value={ctx}>{children}</DialogContext.Provider>
-        </div>
+        <DialogContext.Provider value={ctx}>{children}</DialogContext.Provider>
       </div>
-    </Portal>
+    </div>,
+    document.body,
   );
 }
 
@@ -232,8 +298,8 @@ export function Sheet({
   closeOnEsc = true,
   ariaLabel,
 }: SheetProps) {
-  const { containerRef, ctx } = useDialogShell(open, onClose, closeOnEsc);
-  if (!open) return null;
+  const { containerRef, ctx, active } = useDialogShell(open, onClose, closeOnEsc);
+  if (!active) return null;
 
   const sideClasses: Record<SheetSide, string> = {
     bottom:
@@ -242,32 +308,31 @@ export function Sheet({
     right: 'inset-y-0 right-0 h-full w-72 max-w-[85vw] border-l border-qod-border',
   };
 
-  return (
-    <Portal>
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 bg-black/50"
+      onMouseDown={(e) => {
+        if (closeOnBackdrop && e.target === e.currentTarget) onClose();
+      }}
+    >
       <div
-        className="fixed inset-0 z-50 bg-black/50"
-        onMouseDown={(e) => {
-          if (closeOnBackdrop && e.target === e.currentTarget) onClose();
-        }}
+        ref={containerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={ctx.titleId}
+        aria-describedby={ctx.descriptionId}
+        aria-label={ariaLabel}
+        tabIndex={-1}
+        className={cn(
+          'fixed bg-qod-surface shadow-2xl outline-none overflow-y-auto',
+          sideClasses[side],
+          className,
+        )}
       >
-        <div
-          ref={containerRef}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby={ctx.titleId}
-          aria-describedby={ctx.descriptionId}
-          aria-label={ariaLabel}
-          tabIndex={-1}
-          className={cn(
-            'fixed bg-qod-surface shadow-2xl outline-none overflow-y-auto',
-            sideClasses[side],
-            className,
-          )}
-        >
-          <DialogContext.Provider value={ctx}>{children}</DialogContext.Provider>
-        </div>
+        <DialogContext.Provider value={ctx}>{children}</DialogContext.Provider>
       </div>
-    </Portal>
+    </div>,
+    document.body,
   );
 }
 
