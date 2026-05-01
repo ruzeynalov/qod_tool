@@ -4,7 +4,9 @@
 **Scope:** Make QOD usable on phones (320–414 px), reference devices iPhone 16 (393 px) and Pixel 8 (412 px). **Desktop view (≥1024 px) must remain pixel-identical to today.**
 **Approach:** Mobile-first Tailwind utilities layered onto the existing desktop classes. No component duplication, no separate "mobile app".
 
-**Revision 2 (post-Codex review)** — added: bespoke tables (`users/page.tsx`, `alerts/page.tsx` ×2) and `Tabs` overflow folded into Phase 2; new shared `Dialog`/`Sheet` primitive in Phase 1 (existing `UserSettingsDialog` has no focus trap / scroll lock / focus restoration — confirmed); `getRowKey` shipped alongside `mobileCard` on `DataTable`; iOS auto-zoom audit corrected — `text-sm` inputs in `user-settings-dialog.tsx:9-10` and `select.tsx:32-39` are real and need bumping to `text-base` on `<sm`.
+**Revision 2 (post-Codex round 1)** — added: bespoke tables (`users/page.tsx`, `alerts/page.tsx` ×2) and `Tabs` overflow folded into Phase 2; new shared `Dialog`/`Sheet` primitive in Phase 1 (existing `UserSettingsDialog` has no focus trap / scroll lock / focus restoration — confirmed); `getRowKey` shipped alongside `mobileCard` on `DataTable`; iOS auto-zoom audit corrected — `text-sm` inputs in `user-settings-dialog.tsx:9-10` and `select.tsx:32-39` are real and need bumping to `text-base` on `<sm`.
+
+**Revision 3 (post-Codex round 2 — final)** — Users mobile-card action layout pinned down (per-row Edit / Regenerate password / Block-Unblock / Delete actions at `users/page.tsx:795-835`); `Dialog`/`Sheet` primitive scope hardened with portal mounting (cites `notification-bell.tsx:86` z-index conflict and `users/page.tsx:736` `overflow-hidden` clip risk) and explicit `aria-labelledby` / `aria-describedby` wiring via `DialogTitle` / `DialogDescription` slots; `getRowKey` promoted to a global `DataTable` requirement — only **3** `<DataTable>` callsites today (all in `runs/page.tsx`, lines 315 / 514 / 629), so the migration cost is trivial; focus-restoration safety added (no-op if trigger has unmounted during route change).
 
 ---
 
@@ -66,22 +68,28 @@ The dashboard's job on a phone is **glanceable status + drill-down**, not data e
 
 ### 2.4 Component-level patterns
 
-- **DataTable (`components/ui/data-table.tsx`)** gains two related props in one change:
-  - `mobileCard?: (row: T) => ReactNode` — when set, renders `<ul>` of cards on `<md` (using a `hidden md:block` table + `md:hidden` list pair). Default fallback on `<md` is "first 2 columns visible, rest collapsed under an expand chevron".
-  - `getRowKey?: (row: T, idx: number) => string` — required to ship alongside `mobileCard`. Today rows are keyed by index (`data-table.tsx:153-156`), which is already brittle for resorting and breaks once the same data is rendered in two different DOM shapes at different breakpoints. Every callsite that opts into `mobileCard` must also provide `getRowKey`.
-- **Bespoke tables** (`users/page.tsx`, `alerts/page.tsx`) — two options, one per table based on column count and reuse value:
-  - **Migrate to `DataTable`** when the existing markup is "table for table's sake" with no special row controls (Users — straightforward migration).
-  - **Hand-rolled mobile cards alongside the table** (`hidden md:block` table + `md:hidden` card list in the same component) when migration is too invasive (Alerts rules table has inline edit controls). Both bespoke tables also need `getRowKey` discipline.
+- **DataTable (`components/ui/data-table.tsx`)** gains two related changes:
+  - `getRowKey: (row: T, idx: number) => string` — **required on every callsite**, not only when `mobileCard` is set. There are only 3 `<DataTable>` callsites in the repo today (`runs/page.tsx:315,514,629`), so making row identity explicit everywhere is cheaper than carrying a TS conditional and removes the index-key brittleness on desktop too. Default sort already mutates row order (`data-table.tsx:71-91`), so this is a real correctness win independent of mobile.
+  - `mobileCard?: (row: T) => ReactNode` — optional render. When set, on `<md` the component renders `<ul>` of cards (using a `hidden md:block` table + `md:hidden` list pair), driven by the same `data` and the same `getRowKey`. Default fallback on `<md` (no `mobileCard`) is "first 2 columns visible, rest collapsed under an expand chevron".
+- **Bespoke tables** (`users/page.tsx`, `alerts/page.tsx`) — two paths:
+  - **Users → migrate to `DataTable`.** Each row has 4 inline action buttons today (Edit / Regenerate password / Block-Unblock / Delete at `users/page.tsx:795-835`), so the migration ships an explicit mobile card layout for actions, not just metadata:
+    - **Card body:** Name + role badge (top), email + username (second line), status badge (third line).
+    - **Card footer (action row):** primary actions inline as 44×44 icon-buttons — Edit, Block-Unblock, Delete (the destructive/most-used three). Regenerate password and any future low-frequency actions move into an overflow `⋯` menu (built on `Dialog`/`Sheet`) at the right end of the same row.
+    - "Self" rows still hide Block / Delete — same conditional as today (`users/page.tsx:811`), just applied in the card render.
+  - **Alerts → keep markup, add parallel cards.** Rules (`alerts/page.tsx:245`) has inline edit controls and the History table (`:630`) is read-only. Both get a sibling `md:hidden` card list driven by the same data, both keyed by row id. Visual style mirrors the shared `mobileCard` cards. Not migrated to `DataTable` in this pass — too invasive for the value.
 - **Tabs (`components/ui/tabs.tsx`)** — keep `whitespace-nowrap` per-tab but wrap the `<nav>` in `overflow-x-auto -mx-3 px-3 sm:mx-0 sm:px-0` so the tab row scrolls horizontally inside the page on `<sm` instead of pushing the whole page wider. Add `scroll-snap-type: x mandatory` for predictable swiping.
 - **StatCard** drops its inline icon padding from `p-6` → `p-4` on `<sm`, font from `text-2xl` → `text-xl`.
 - **Charts** — wrap each chart container in `h-56 sm:h-64 lg:h-72`, axis font `fontSize={11}` on `<sm` via responsive prop. Legends move below the chart on `<sm`.
-- **Dialog primitive (new)** — Codex correctly flagged that the existing `UserSettingsDialog` (`components/layout/user-settings-dialog.tsx:61-154`) is a bare overlay with **no focus trap, no scroll lock, and no focus restoration**. Before the off-canvas sidebar / bottom sheets land, we extract a small `Dialog` (and `Sheet`) primitive in `components/ui/dialog.tsx` that handles:
-  - Focus trap (cycle Tab inside the dialog, restore on close).
-  - Inert background (`aria-hidden` on `#__next` siblings + `inert` attribute where supported).
-  - Body scroll lock via the standard `overflow:hidden` on `<html>` while open.
-  - `Esc` to close, click-on-backdrop to close (configurable).
-  - Initial focus to first focusable element or to a `data-autofocus` target.
-  Then `UserSettingsDialog`, the new `MobileSidebarDrawer`, the filter `BottomSheet`, and `TestHistoryDrawer` all build on top of it. This is one new file (~120 LOC) plus a small migration of the existing dialog. **Without this, the Lighthouse a11y target is at risk.**
+- **Dialog primitive (new)** — Codex flagged in two rounds that the existing `UserSettingsDialog` (`components/layout/user-settings-dialog.tsx:61-154`) is a bare overlay with **no focus trap, no scroll lock, no focus restoration, no portal, no a11y labelling**. Before any drawer/sheet lands, we extract a small `Dialog` (+ `Sheet`) primitive in `components/ui/dialog.tsx` with the following surface:
+  - **Portal mounting.** Renders into `document.body` via `createPortal` so it escapes ancestor `overflow-hidden` and z-index stacking contexts. This matters because the app already has cases that would clip or stack badly: `notification-bell.tsx:86` is an absolute overlay at `z-[60]`, and `users/page.tsx:736` wraps its table card in `overflow-hidden`.
+  - **A11y labelling.** Exposes `DialogTitle` and `DialogDescription` slot components that auto-wire `aria-labelledby` and `aria-describedby` on the root. `aria-modal="true"` + role `dialog` on the root. Lint-style assertion in dev: warn if a `Dialog` mounts without a `DialogTitle`.
+  - **Focus trap.** Cycles Tab inside the dialog; restores focus to the original trigger on close. **Fail-safe**: if the trigger node is no longer in the document on close (route change, parent remount), restore to `document.body` and emit a one-line console warning in dev only — never throw.
+  - **Inert background.** `aria-hidden="true"` + `inert` attribute on siblings of the portal root while open (with feature-detect fallback for older browsers).
+  - **Body scroll lock.** `overflow:hidden` on `<html>` while any dialog is open; refcount so multiple stacked dialogs don't unlock prematurely.
+  - **Close behaviour.** `Esc` to close; click-on-backdrop to close (both configurable per instance).
+  - **Initial focus.** First focusable in the dialog, or a `data-autofocus` target if present.
+  - **Sheet variant.** Same primitive, slides in from `bottom` (mobile default) or `left`/`right` (sidebar drawer). Inherits all of the above.
+  Then `UserSettingsDialog`, the new `MobileSidebarDrawer`, the filter `BottomSheet`, the Users overflow `⋯` menu, and `TestHistoryDrawer` all build on top of it. This is one new file (~150 LOC after the additions above) plus a small migration of the existing dialog. **Without this, the Lighthouse a11y target is at risk and stacking/clip bugs are inevitable.**
 - **Modals** — every dialog gets `w-[calc(100vw-1rem)] max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto`. Use `dvh` (dynamic viewport) so iOS Safari address bar does not chop content.
 - **Drawer** (`test-history-drawer.tsx`) — full width on `<sm` (`w-full`), slide from bottom (sheet style) instead of right; existing right-slide preserved on `≥md`. Built on the new `Sheet` primitive so it inherits focus-trap / scroll-lock automatically.
 - **Forms** — `grid grid-cols-2` becomes `grid grid-cols-1 sm:grid-cols-2` everywhere in `settings/`. KPI Formula Configurator's fixed `260px` left rail stacks on top on `<lg`.
@@ -113,12 +121,14 @@ Acceptance: at 375 px, app is navigable, no horizontal page scroll, every page r
 
 ### Phase 2 — Tables, tabs & charts (Day 2, ~1¼ days)
 
-1. Extend `DataTable` with `mobileCard?: (row: T) => ReactNode` **and** `getRowKey?: (row: T, idx: number) => string`. When `mobileCard` is set, `getRowKey` becomes required at compile time (TS conditional types) and rows in both DOM shapes use it. Default desktop behaviour unchanged.
-2. Provide `mobileCard` + `getRowKey` for the four heaviest tables that already use `DataTable`: **Runs, Defects, Coverage test cases, Stories** (and the per-test execution lists in the side-drawer).
-   - Card shape: top row = primary identifier (run name / defect title / test name) + status badge; secondary row = 2–3 metadata pills; tap opens existing detail view.
-3. **Bespoke tables** — fold these into Phase 2 as a parallel sub-task:
-   - `users/page.tsx:737` — migrate onto `DataTable` (no inline edit controls, straightforward) and supply `mobileCard` for the user row.
-   - `alerts/page.tsx:245` (rules) and `:630` (history) — keep markup, add a sibling `md:hidden` card list driven by the same data; both lists keyed by `rule.id` / `event.id`. Reuses the visual style of the new shared `mobileCard` cards for consistency.
+1. Extend `DataTable`:
+   - Add `getRowKey: (row: T, idx: number) => string` as a **required** prop on every callsite (3 in the repo today, all in `runs/page.tsx`). Migrate the existing 3 callsites in the same commit.
+   - Add optional `mobileCard?: (row: T) => ReactNode`. When set, render `<ul>` on `<md` (using a `hidden md:block` table + `md:hidden` list pair). Default desktop behaviour unchanged.
+2. Provide `mobileCard` for the `DataTable` callsites that need it (`runs/page.tsx`) plus the per-test execution lists rendered through it.
+   - Card shape: top row = primary identifier (run name / test name) + status badge; secondary row = 2–3 metadata pills; tap opens existing detail view.
+3. **Bespoke tables** — parallel sub-task in the same phase:
+   - `users/page.tsx:737` — migrate onto `DataTable`, provide `mobileCard` with the action layout described in §2.4 (3 inline 44×44 actions + overflow `⋯` menu for Regenerate password). Self-row hides Block / Delete (existing condition at `users/page.tsx:811`).
+   - `alerts/page.tsx:245` (rules) and `:630` (history) — keep markup, add sibling `md:hidden` card lists driven by the same data; lists keyed by `rule.id` / `event.id`. Visual matches the shared `mobileCard` cards.
 4. **Tabs** — wrap the existing nowrap row in `overflow-x-auto -mx-3 px-3 sm:mx-0 sm:px-0` with scroll-snap. Verify Coverage tabs (Stories / Epic Coverage / Test Cases) scroll cleanly at 320 px.
 5. Wrap chart containers in responsive heights (`h-56 sm:h-64 lg:h-72`) and pass `fontSize={11}` axis tick props on `<sm`. Move legend `verticalAlign="bottom"` on `<sm`.
 6. Filter rows on Runs / Defects / Coverage become a single "Filters" button on `<md` that opens a `Sheet` containing the same form.
@@ -157,8 +167,9 @@ Acceptance: full UX pass on iPhone 16, Pixel 8, iPhone SE (375), and Galaxy Fold
 
 | Risk | Mitigation |
 |---|---|
-| Drawer / sheet captures focus or leaks it back to the page underneath | Build the new shared `Dialog`/`Sheet` primitive in Phase 1 (focus trap, body scroll lock, focus restoration, `Esc`/backdrop close, `aria-modal`). The existing `UserSettingsDialog` has none of this — Codex confirmed — so we cannot "reuse the dialog pattern" and must build it. Every later drawer/sheet inherits from this primitive. |
-| `mobileCard` divergence — table and card list show different data or lose row identity on resort | Both render from the same `data` array in `DataTable`; `mobileCard` is a presentation function only, sort/pagination state is shared. Mandatory `getRowKey` (TS-enforced when `mobileCard` is set) replaces today's `key={idx}` so resort + breakpoint swap stays stable. |
+| Drawer / sheet captures focus, leaks it back to the page underneath, or clips behind a stacking context | Build the new shared `Dialog`/`Sheet` primitive in Phase 1 with portal mounting, focus trap, body scroll lock, focus restoration, `aria-modal`, `aria-labelledby`/`aria-describedby` slots, `Esc`/backdrop close. The existing `UserSettingsDialog` has none of this. Every later drawer/sheet inherits from this primitive. |
+| Focus restoration crashes if trigger unmounts during route change | Restore-on-close checks `document.contains(triggerEl)` first; if false, restores to `document.body` and emits a dev-only console warning. Never throws. |
+| `mobileCard` divergence — table and card list show different data or lose row identity on resort | Both render from the same `data` array in `DataTable`; `mobileCard` is a presentation function only, sort/pagination state is shared. **Required** `getRowKey` (on every `DataTable` callsite, not only mobile) replaces today's `key={idx}` so resort + breakpoint swap stays stable. |
 | Bespoke tables drift from the shared mobile card style | Hand-rolled cards in `users/page.tsx` (after migration to `DataTable`) and `alerts/page.tsx` use the same Tailwind class set as the shared cards; the visual is documented in this plan rather than encoded in code so the next bespoke table follows it too. |
 | Bottom sheets fight iOS keyboard | Use `100dvh` not `100vh`; the new `Sheet` primitive owns this. Smoke-tested on iOS Safari with a focused input. |
 | iOS Safari zooms on input focus | Phase 3 sweep moves shared input class and `Select` from `text-sm` (14 px) to `text-base sm:text-sm` (16 px on mobile). |
@@ -169,9 +180,9 @@ Acceptance: full UX pass on iPhone 16, Pixel 8, iPhone SE (375), and Galaxy Fold
 
 | Phase | Files touched | Net new code |
 |---|---|---|
-| 1 | 4 layout files + new `dialog.tsx` primitive + `user-settings-dialog.tsx` migration + ~12 page files (sweep) | ~280 LOC |
-| 2 | `data-table.tsx`, `tabs.tsx`, 4 `DataTable` pages + bespoke tables (`users/page.tsx`, `alerts/page.tsx`) + 5 chart wrappers | ~400 LOC |
-| 3 | `header.tsx`, drawer, formula configurator, iOS input audit (~3-5 form/select files) | ~180 LOC |
+| 1 | 4 layout files + new `dialog.tsx` primitive (~150 LOC, portal + a11y) + `user-settings-dialog.tsx` migration + ~12 page files (sweep) | ~310 LOC |
+| 2 | `data-table.tsx` + 3 `<DataTable>` callsites (required `getRowKey`), `tabs.tsx`, `runs/page.tsx` mobile cards, bespoke tables (`users/page.tsx` migration, `alerts/page.tsx` parallel cards) + 5 chart wrappers | ~400 LOC |
+| 3 | `header.tsx`, `test-history-drawer.tsx`, formula configurator, iOS input audit (~3–5 form/select files) | ~180 LOC |
 | 4 | 1 new e2e spec + screenshot baselines | ~80 LOC |
 
-Total: ~940 LOC of additive Tailwind/JSX changes plus one new ~120 LOC `Dialog`/`Sheet` primitive, zero deletions on desktop classes.
+Total: ~970 LOC of additive Tailwind/JSX changes plus one new ~150 LOC `Dialog`/`Sheet` primitive, zero deletions on desktop classes.
