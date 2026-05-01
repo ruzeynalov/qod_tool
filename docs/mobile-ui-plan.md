@@ -4,6 +4,8 @@
 **Scope:** Make QOD usable on phones (320–414 px), reference devices iPhone 16 (393 px) and Pixel 8 (412 px). **Desktop view (≥1024 px) must remain pixel-identical to today.**
 **Approach:** Mobile-first Tailwind utilities layered onto the existing desktop classes. No component duplication, no separate "mobile app".
 
+**Revision 2 (post-Codex review)** — added: bespoke tables (`users/page.tsx`, `alerts/page.tsx` ×2) and `Tabs` overflow folded into Phase 2; new shared `Dialog`/`Sheet` primitive in Phase 1 (existing `UserSettingsDialog` has no focus trap / scroll lock / focus restoration — confirmed); `getRowKey` shipped alongside `mobileCard` on `DataTable`; iOS auto-zoom audit corrected — `text-sm` inputs in `user-settings-dialog.tsx:9-10` and `select.tsx:32-39` are real and need bumping to `text-base` on `<sm`.
+
 ---
 
 ## 1. Current state — why it breaks on phones
@@ -17,14 +19,16 @@ Survey of `packages/web/src/`:
 | Sidebar | `components/layout/sidebar.tsx:59-63` | `fixed left-0 w-60` (or `w-16` collapsed) — always present, no off-canvas. Even collapsed it eats 64 px. |
 | Header | `components/layout/header.tsx:79` | `h-14 px-6` with a long breadcrumb trail + 5 right-side controls (demo toggle, bell, paint, theme, avatar). On 375 px the row overflows and the breadcrumb wraps awkwardly. |
 | Header menus | `header.tsx:129,176` | Dropdowns use `w-52` / `w-48` positioned `right-0`. Fine — just need to verify they do not exceed `100vw - 16px`. |
-| Tables | `components/ui/data-table.tsx:98-99` | Single `overflow-x-auto`. Real-world usage (Runs, Defects, Coverage) renders 6–9 columns at `text-sm` — practically unreadable on phones, requires constant horizontal scrolling. |
+| Tables (shared) | `components/ui/data-table.tsx:98-99` | Single `overflow-x-auto`. Real-world usage (Runs, Defects, Coverage) renders 6–9 columns at `text-sm` — practically unreadable on phones, requires constant horizontal scrolling. Rows also keyed by index (`:153-156`), brittle once breakpoint can swap DOM. |
+| Tables (bespoke) | `users/page.tsx:737`, `alerts/page.tsx:245`, `:630` | Three wide tables that **do not use `DataTable`** — `mobileCard` alone will not reach them. Need either migration or a parallel mobile treatment. |
+| Tabs | `components/ui/tabs.tsx:22-32` | `flex` row with `whitespace-nowrap` items, no horizontal scroll. With 4–6 tabs (e.g. Coverage's Stories/Epics/Cases) the row overflows the viewport at `<sm`. |
 | Page grids | `projects/[id]/{runs,defects,settings,users}/page.tsx` | Hard `grid-cols-2` / `grid-cols-3` without breakpoint — KPI tiles jam into 150 px columns on a 320 px screen. |
 | Charts | `components/charts/*.tsx`, `kpis/page.tsx:508` | Hardcoded heights `h-64` / `h-72`, `fontSize={12}` axis labels. Charts render but legends/labels collide. |
 | KPI page | `kpis/page.tsx` | Trend chart toolbar (period selector + metric chips) assumes wide row, wraps poorly. |
 | Modals/dialogs | `settings/page.tsx`, `user-settings-dialog.tsx`, `test-history-drawer.tsx` | Use `max-w-lg` / `max-w-md` with `mx-4`. Drawer width may exceed viewport on small phones. |
 | Tap targets | Various | Many buttons at `h-8 w-8` (32 px) — below the 44 px minimum recommended for touch. |
 
-**Summary:** ~80 % of the brokenness is fixed by three things — viewport meta, off-canvas sidebar, and a card-mode for tables. The rest is a sweep through grids and chart heights.
+**Summary:** the bulk of the brokenness is fixed by four things — viewport meta, off-canvas sidebar, a card-mode for shared tables, and a parallel pass over the three bespoke tables (Users, Alerts ×2). The rest is a sweep through grids, chart heights, tab overflow, dialog a11y, and the 16 px input audit.
 
 ---
 
@@ -62,18 +66,31 @@ The dashboard's job on a phone is **glanceable status + drill-down**, not data e
 
 ### 2.4 Component-level patterns
 
-- **DataTable (`components/ui/data-table.tsx`)** gains an optional `mobileCard` render prop. When set, on `<md` the table renders as `<ul>` of cards using the same data, same sort/pagination — just a different DOM. Default fallback on `<md` is "first 2 columns visible, rest collapsed under an expand chevron".
+- **DataTable (`components/ui/data-table.tsx`)** gains two related props in one change:
+  - `mobileCard?: (row: T) => ReactNode` — when set, renders `<ul>` of cards on `<md` (using a `hidden md:block` table + `md:hidden` list pair). Default fallback on `<md` is "first 2 columns visible, rest collapsed under an expand chevron".
+  - `getRowKey?: (row: T, idx: number) => string` — required to ship alongside `mobileCard`. Today rows are keyed by index (`data-table.tsx:153-156`), which is already brittle for resorting and breaks once the same data is rendered in two different DOM shapes at different breakpoints. Every callsite that opts into `mobileCard` must also provide `getRowKey`.
+- **Bespoke tables** (`users/page.tsx`, `alerts/page.tsx`) — two options, one per table based on column count and reuse value:
+  - **Migrate to `DataTable`** when the existing markup is "table for table's sake" with no special row controls (Users — straightforward migration).
+  - **Hand-rolled mobile cards alongside the table** (`hidden md:block` table + `md:hidden` card list in the same component) when migration is too invasive (Alerts rules table has inline edit controls). Both bespoke tables also need `getRowKey` discipline.
+- **Tabs (`components/ui/tabs.tsx`)** — keep `whitespace-nowrap` per-tab but wrap the `<nav>` in `overflow-x-auto -mx-3 px-3 sm:mx-0 sm:px-0` so the tab row scrolls horizontally inside the page on `<sm` instead of pushing the whole page wider. Add `scroll-snap-type: x mandatory` for predictable swiping.
 - **StatCard** drops its inline icon padding from `p-6` → `p-4` on `<sm`, font from `text-2xl` → `text-xl`.
 - **Charts** — wrap each chart container in `h-56 sm:h-64 lg:h-72`, axis font `fontSize={11}` on `<sm` via responsive prop. Legends move below the chart on `<sm`.
+- **Dialog primitive (new)** — Codex correctly flagged that the existing `UserSettingsDialog` (`components/layout/user-settings-dialog.tsx:61-154`) is a bare overlay with **no focus trap, no scroll lock, and no focus restoration**. Before the off-canvas sidebar / bottom sheets land, we extract a small `Dialog` (and `Sheet`) primitive in `components/ui/dialog.tsx` that handles:
+  - Focus trap (cycle Tab inside the dialog, restore on close).
+  - Inert background (`aria-hidden` on `#__next` siblings + `inert` attribute where supported).
+  - Body scroll lock via the standard `overflow:hidden` on `<html>` while open.
+  - `Esc` to close, click-on-backdrop to close (configurable).
+  - Initial focus to first focusable element or to a `data-autofocus` target.
+  Then `UserSettingsDialog`, the new `MobileSidebarDrawer`, the filter `BottomSheet`, and `TestHistoryDrawer` all build on top of it. This is one new file (~120 LOC) plus a small migration of the existing dialog. **Without this, the Lighthouse a11y target is at risk.**
 - **Modals** — every dialog gets `w-[calc(100vw-1rem)] max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto`. Use `dvh` (dynamic viewport) so iOS Safari address bar does not chop content.
-- **Drawer** (`test-history-drawer.tsx`) — full width on `<sm` (`w-full`), slide from bottom (sheet style) instead of right; existing right-slide preserved on `≥md`.
+- **Drawer** (`test-history-drawer.tsx`) — full width on `<sm` (`w-full`), slide from bottom (sheet style) instead of right; existing right-slide preserved on `≥md`. Built on the new `Sheet` primitive so it inherits focus-trap / scroll-lock automatically.
 - **Forms** — `grid grid-cols-2` becomes `grid grid-cols-1 sm:grid-cols-2` everywhere in `settings/`. KPI Formula Configurator's fixed `260px` left rail stacks on top on `<lg`.
 
 ### 2.5 Touch ergonomics
 
 - Minimum tap target 44×44 px on `<md`. `h-8 w-8` controls in the header become `h-10 w-10` on mobile (`h-8 lg:h-8 sm:h-10` style).
 - Increase row height in card lists (≥56 px) to reduce mis-taps.
-- `font-size: 16px` minimum on inputs to prevent iOS auto-zoom on focus (already true for default `text-base`; verify any `text-sm` inputs).
+- **iOS auto-zoom audit** — Codex correctly flagged that the previous claim ("16 px is already true") was wrong. The shared input class in `user-settings-dialog.tsx:9-10` and the `Select` element in `components/ui/select.tsx:32-39` are both `text-sm` (14 px), which **does** trigger zoom-on-focus on iOS Safari. Phase 3 sweep: any `<input>`, `<textarea>`, or `<select>` that today uses `text-sm` is bumped to `text-base` (16 px) on `<sm` (`text-base sm:text-sm` for backward-compat with the existing visual). Where the design strictly requires `text-sm` text, set `font-size: 16px` only on focus or use a 16 px input with smaller visual padding.
 
 ---
 
@@ -81,37 +98,43 @@ The dashboard's job on a phone is **glanceable status + drill-down**, not data e
 
 Each phase is independently mergeable and each is desktop-safe (no `lg:` class is ever removed; only mobile-first counterparts are added).
 
-### Phase 1 — Foundation (Day 1, ~½ day of dev)
+### Phase 1 — Foundation + a11y primitive (Day 1, ~1 day of dev)
 
-Goal: stop the bleeding. After this phase the app is at least laid out correctly on mobile, even if individual pages still feel cramped.
+Goal: stop the bleeding and ship the shared `Dialog`/`Sheet` primitive that everything else depends on. After this phase the app is at least laid out correctly on mobile, even if individual pages still feel cramped.
 
-1. `app/layout.tsx` — add Metadata viewport: `viewport: { width: 'device-width', initialScale: 1, maximumScale: 5 }` (Next 14 supports the `viewport` export).
+1. `app/layout.tsx` — add Next 14 `viewport` export: `{ width: 'device-width', initialScale: 1, maximumScale: 5 }`.
 2. `components/layout/dashboard-layout.tsx` — replace inline `paddingLeft` with Tailwind classes: `lg:pl-60` (or `lg:pl-16` when collapsed). On `<lg` no left padding — sidebar is off-canvas.
-3. `components/layout/sidebar.tsx` — accept `mobileOpen` prop, become `fixed inset-y-0 left-0 z-50 w-72 -translate-x-full transition-transform lg:translate-x-0 lg:w-60` (and `w-16` collapsed). Add backdrop overlay on `<lg` when open. Close on route change.
-4. `components/layout/header.tsx` — add hamburger button visible `<lg`, hidden `lg:hidden`. Reduce `px-6` → `px-3 lg:px-6`. Truncate breadcrumbs to current page on `<sm` (`hidden sm:flex` on intermediate crumbs).
-5. Sweep all `grid-cols-2` / `grid-cols-3` without breakpoint prefix in pages and convert to `grid-cols-1 sm:grid-cols-2 lg:grid-cols-N`. Same for any `flex` rows that crowd controls — apply `flex-col sm:flex-row`.
+3. `components/ui/dialog.tsx` (**new**) — extract focus-trap + scroll-lock + focus-restoration + `Esc`/backdrop-close primitive. Export `Dialog` (centred) and `Sheet` (bottom). Migrate `UserSettingsDialog` onto it as the first consumer in this phase, so the new primitive is exercised end-to-end.
+4. `components/layout/sidebar.tsx` — accept `mobileOpen` prop, become `fixed inset-y-0 left-0 z-50 w-72 -translate-x-full transition-transform lg:translate-x-0 lg:w-60` (and `w-16` collapsed). Built on the new `Sheet` primitive so a11y is inherited. Add backdrop on `<lg`. Close on route change.
+5. `components/layout/header.tsx` — add hamburger button visible `<lg`, hidden `lg:hidden`. Reduce `px-6` → `px-3 lg:px-6`. Truncate breadcrumbs to current page on `<sm` (`hidden sm:flex` on intermediate crumbs).
+6. Sweep all `grid-cols-2` / `grid-cols-3` without breakpoint prefix in pages and convert to `grid-cols-1 sm:grid-cols-2 lg:grid-cols-N`. Same for any `flex` rows that crowd controls — apply `flex-col sm:flex-row`.
 
-Acceptance: at 375 px, app is navigable, no horizontal page scroll, every page renders without overflow on the **outer** axis. Tables may still scroll horizontally — that is Phase 2.
+Acceptance: at 375 px, app is navigable, no horizontal page scroll, every page renders without overflow on the **outer** axis. Sidebar drawer passes manual focus-trap test (Tab cycles inside, `Esc` closes, focus returns to hamburger). Tables may still scroll horizontally — that is Phase 2.
 
-### Phase 2 — Tables & charts (Day 2, ~1 day)
+### Phase 2 — Tables, tabs & charts (Day 2, ~1¼ days)
 
-1. Extend `DataTable` with an optional `mobileCard?: (row: T) => ReactNode` render. When provided, render `<ul>` on `<md` (using a `hidden md:block` table + `md:hidden` list pair).
-2. Provide `mobileCard` for the four heaviest tables: Runs, Defects, Coverage test cases, Users.
-   - Card shape: top row = primary identifier (run name / defect title / test name / user email) + status badge; secondary row = 2–3 metadata pills; tap opens existing detail view.
-3. Wrap chart containers in responsive heights and pass `fontSize={11}` axis tick props on `<sm`. Move legend `verticalAlign="bottom"` on `<sm`.
-4. Filter rows on Runs / Defects / Coverage become a single "Filters" button on `<md` that opens a bottom sheet containing the same form.
+1. Extend `DataTable` with `mobileCard?: (row: T) => ReactNode` **and** `getRowKey?: (row: T, idx: number) => string`. When `mobileCard` is set, `getRowKey` becomes required at compile time (TS conditional types) and rows in both DOM shapes use it. Default desktop behaviour unchanged.
+2. Provide `mobileCard` + `getRowKey` for the four heaviest tables that already use `DataTable`: **Runs, Defects, Coverage test cases, Stories** (and the per-test execution lists in the side-drawer).
+   - Card shape: top row = primary identifier (run name / defect title / test name) + status badge; secondary row = 2–3 metadata pills; tap opens existing detail view.
+3. **Bespoke tables** — fold these into Phase 2 as a parallel sub-task:
+   - `users/page.tsx:737` — migrate onto `DataTable` (no inline edit controls, straightforward) and supply `mobileCard` for the user row.
+   - `alerts/page.tsx:245` (rules) and `:630` (history) — keep markup, add a sibling `md:hidden` card list driven by the same data; both lists keyed by `rule.id` / `event.id`. Reuses the visual style of the new shared `mobileCard` cards for consistency.
+4. **Tabs** — wrap the existing nowrap row in `overflow-x-auto -mx-3 px-3 sm:mx-0 sm:px-0` with scroll-snap. Verify Coverage tabs (Stories / Epic Coverage / Test Cases) scroll cleanly at 320 px.
+5. Wrap chart containers in responsive heights (`h-56 sm:h-64 lg:h-72`) and pass `fontSize={11}` axis tick props on `<sm`. Move legend `verticalAlign="bottom"` on `<sm`.
+6. Filter rows on Runs / Defects / Coverage become a single "Filters" button on `<md` that opens a `Sheet` containing the same form.
 
-Acceptance: Runs/Defects/Coverage are usable on iPhone 16 with no horizontal scroll. KPI page chart is readable.
+Acceptance: Runs / Defects / Coverage / Users / Alerts are usable on iPhone 16 with no horizontal page scroll. Tabs row scrolls cleanly. KPI page chart is readable. No `key={idx}` warnings in the console at any breakpoint.
 
-### Phase 3 — Polish (Day 3, ~½ day)
+### Phase 3 — Polish + iOS input audit (Day 3, ~¾ day)
 
 1. Header right-side controls collapse into `⋯` menu on `<sm`. Bell + avatar stay.
-2. Modals/dialogs adopt the `w-[calc(100vw-1rem)] max-h-[calc(100dvh-2rem)]` pattern. `test-history-drawer` becomes a bottom sheet on `<sm`.
+2. Remaining modals/drawers adopt the new `Dialog`/`Sheet` primitive: `test-history-drawer` becomes a bottom sheet on `<sm`; settings dialogs adopt `w-[calc(100vw-1rem)] max-h-[calc(100dvh-2rem)]`.
 3. Tap-target sweep: `h-8 w-8` controls → `h-10 w-10` on `<sm`.
-4. KPI Formula Configurator and any `lg:grid-cols-[260px_minmax(0,1fr)]` rails stack vertically on `<lg`.
-5. Project switcher dropdown beside page title for `/projects/[id]/*` pages on `<lg`.
+4. **iOS auto-zoom sweep** — grep `<input|<textarea|<select|inputClass` for `text-sm`, change to `text-base sm:text-sm` (or pure `text-base` when `sm:` differs). Specifically covers `user-settings-dialog.tsx:9-10` and `components/ui/select.tsx:32-39`, plus any settings forms found in the sweep.
+5. KPI Formula Configurator and any `lg:grid-cols-[260px_minmax(0,1fr)]` rails stack vertically on `<lg`.
+6. Project switcher dropdown beside page title for `/projects/[id]/*` pages on `<lg`.
 
-Acceptance: full UX pass on iPhone 16, Pixel 8, iPhone SE (375), and Galaxy Fold cover (320). All flows from the README's "Dashboard Modules" section are completable.
+Acceptance: full UX pass on iPhone 16, Pixel 8, iPhone SE (375), and Galaxy Fold cover (320). No input triggers iOS zoom-on-focus. All flows from the README's "Dashboard Modules" section are completable.
 
 ### Phase 4 — Verification
 
@@ -134,9 +157,11 @@ Acceptance: full UX pass on iPhone 16, Pixel 8, iPhone SE (375), and Galaxy Fold
 
 | Risk | Mitigation |
 |---|---|
-| Hamburger drawer captures focus / breaks keyboard nav | Use the same focus-trap pattern as the existing `user-settings-dialog`; restore focus to trigger on close. |
-| `mobileCard` divergence — table and card list show different data | Both render from the same `data` array in `DataTable`; `mobileCard` is a presentation function only, not a data fork. Sort/pagination state is shared. |
-| Bottom sheets fight iOS keyboard | Use `100dvh` not `100vh`; test on iOS Safari with focused input. |
+| Drawer / sheet captures focus or leaks it back to the page underneath | Build the new shared `Dialog`/`Sheet` primitive in Phase 1 (focus trap, body scroll lock, focus restoration, `Esc`/backdrop close, `aria-modal`). The existing `UserSettingsDialog` has none of this — Codex confirmed — so we cannot "reuse the dialog pattern" and must build it. Every later drawer/sheet inherits from this primitive. |
+| `mobileCard` divergence — table and card list show different data or lose row identity on resort | Both render from the same `data` array in `DataTable`; `mobileCard` is a presentation function only, sort/pagination state is shared. Mandatory `getRowKey` (TS-enforced when `mobileCard` is set) replaces today's `key={idx}` so resort + breakpoint swap stays stable. |
+| Bespoke tables drift from the shared mobile card style | Hand-rolled cards in `users/page.tsx` (after migration to `DataTable`) and `alerts/page.tsx` use the same Tailwind class set as the shared cards; the visual is documented in this plan rather than encoded in code so the next bespoke table follows it too. |
+| Bottom sheets fight iOS keyboard | Use `100dvh` not `100vh`; the new `Sheet` primitive owns this. Smoke-tested on iOS Safari with a focused input. |
+| iOS Safari zooms on input focus | Phase 3 sweep moves shared input class and `Select` from `text-sm` (14 px) to `text-base sm:text-sm` (16 px on mobile). |
 | Chart `ResponsiveContainer` glitches on rotate | Already used; add `key={orientation}` only if a flicker is observed. |
 | Visual regression on desktop from a careless edit | Phase 4 baselines + the rule "never delete a `lg:` class" make this catchable. |
 
@@ -144,9 +169,9 @@ Acceptance: full UX pass on iPhone 16, Pixel 8, iPhone SE (375), and Galaxy Fold
 
 | Phase | Files touched | Net new code |
 |---|---|---|
-| 1 | 4 layout files + ~12 page files (sweep) | ~150 LOC |
-| 2 | `data-table.tsx` + 4 page files + 5 chart wrappers | ~250 LOC |
-| 3 | `header.tsx`, dialogs, drawer, formula configurator | ~150 LOC |
+| 1 | 4 layout files + new `dialog.tsx` primitive + `user-settings-dialog.tsx` migration + ~12 page files (sweep) | ~280 LOC |
+| 2 | `data-table.tsx`, `tabs.tsx`, 4 `DataTable` pages + bespoke tables (`users/page.tsx`, `alerts/page.tsx`) + 5 chart wrappers | ~400 LOC |
+| 3 | `header.tsx`, drawer, formula configurator, iOS input audit (~3-5 form/select files) | ~180 LOC |
 | 4 | 1 new e2e spec + screenshot baselines | ~80 LOC |
 
-Total: ~630 LOC of additive Tailwind/JSX changes, zero deletions on desktop classes.
+Total: ~940 LOC of additive Tailwind/JSX changes plus one new ~120 LOC `Dialog`/`Sheet` primitive, zero deletions on desktop classes.
