@@ -55,6 +55,13 @@ function unlockBodyScroll() {
   if (scrollLockCount === 0) document.documentElement.style.overflow = '';
 }
 
+// Top-of-stack guard. Each open Dialog/Sheet pushes its identity on mount of
+// its setup effect and pops on cleanup. Only the current top responds to
+// keyboard events and only the top closing dialog restores focus, so stacked
+// modals don't all close on a single Escape and a background dialog
+// unmounting (e.g. via route change) doesn't yank focus from the foreground.
+const dialogStack: object[] = [];
+
 const inertCounts = new WeakMap<HTMLElement, number>();
 const inertOriginals = new WeakMap<
   HTMLElement,
@@ -142,6 +149,8 @@ function useDialogShell(open: boolean, onClose: () => void, closeOnEsc: boolean)
   const titleId = useId();
   const descriptionId = useId();
   const hasTitleRef = useRef(false);
+  // Stable per-component identity used as the top-of-stack token.
+  const [stackHandle] = useState(() => ({}));
 
   // Capture the element that had focus when the dialog opened.
   useLayoutEffect(() => {
@@ -165,6 +174,7 @@ function useDialogShell(open: boolean, onClose: () => void, closeOnEsc: boolean)
     if (!container) return;
 
     const inertedSiblings = applyInertBackground(container);
+    dialogStack.push(stackHandle);
 
     const initial =
       container.querySelector<HTMLElement>('[data-autofocus]') ??
@@ -172,7 +182,13 @@ function useDialogShell(open: boolean, onClose: () => void, closeOnEsc: boolean)
       container;
     initial.focus({ preventScroll: true });
 
+    const isTop = () => dialogStack[dialogStack.length - 1] === stackHandle;
+
     function handleKey(e: KeyboardEvent) {
+      // Only the top-of-stack dialog handles keyboard events. Other listeners
+      // on the same `document` target still fire (stopPropagation can't stop
+      // sibling listeners), so each must self-gate.
+      if (!isTop()) return;
       if (e.key === 'Escape' && closeOnEsc) {
         e.stopPropagation();
         onClose();
@@ -200,19 +216,26 @@ function useDialogShell(open: boolean, onClose: () => void, closeOnEsc: boolean)
     return () => {
       document.removeEventListener('keydown', handleKey);
       releaseInertBackground(inertedSiblings);
+
+      // Pop self off the stack regardless of position. Only restore focus if
+      // we *were* the top — otherwise the still-open foreground dialog owns
+      // focus and we must not yank it away.
+      const wasTop = isTop();
+      const idx = dialogStack.indexOf(stackHandle);
+      if (idx !== -1) dialogStack.splice(idx, 1);
+      if (!wasTop) return;
+
       const trigger = triggerRef.current;
       if (trigger && document.contains(trigger) && typeof trigger.focus === 'function') {
         trigger.focus({ preventScroll: true });
-      } else {
-        if (trigger && process.env.NODE_ENV !== 'production') {
+      } else if (trigger && process.env.NODE_ENV !== 'production') {
 
-          console.warn(
-            '[Dialog] Trigger element unmounted while dialog was open; focus not restored.',
-          );
-        }
+        console.warn(
+          '[Dialog] Trigger element unmounted while dialog was open; focus not restored.',
+        );
       }
     };
-  }, [active, onClose, closeOnEsc]);
+  }, [active, onClose, closeOnEsc, stackHandle]);
 
   // Dev-only warning if no DialogTitle was rendered (after first paint).
   useEffect(() => {
