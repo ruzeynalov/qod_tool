@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Sun, Moon, ChevronRight, User, Paintbrush, Check, LogOut, Settings } from 'lucide-react';
+import { Sun, Moon, ChevronRight, User, Paintbrush, Check, LogOut, Settings, Menu } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useTheme, type Skin } from '@/app/_providers/theme-provider';
 import { useDemoMode } from '@/app/_providers/demo-mode-provider';
@@ -49,7 +49,11 @@ const skinOptions: { value: Skin; label: string; description: string }[] = [
   { value: 'modern', label: 'Modern', description: 'Clean, professional look' },
 ];
 
-export function Header() {
+interface HeaderProps {
+  onMenuClick?: () => void;
+}
+
+export function Header({ onMenuClick }: HeaderProps = {}) {
   const pathname = usePathname() ?? '';
   const router = useRouter();
   const { theme, skin, toggleTheme, setSkin } = useTheme();
@@ -76,28 +80,53 @@ export function Header() {
   }, []);
 
   return (
-    <header className="flex h-14 items-center justify-between border-b border-qod-border bg-qod-surface px-6">
-      {/* Breadcrumbs */}
-      <nav className="flex items-center gap-1 text-sm">
-        {breadcrumbs.map((crumb, i) => (
-          <span key={crumb.href} className="flex items-center gap-1">
-            {i > 0 && <ChevronRight className="h-3 w-3 text-muted" />}
-            {i === breadcrumbs.length - 1 ? (
-              <span className="font-medium text-primary">{crumb.label}</span>
-            ) : (
-              <Link
-                href={crumb.href}
-                className="text-muted transition-colors hover:text-primary"
+    <header className="flex h-14 items-center justify-between gap-2 border-b border-qod-border bg-qod-surface px-3 lg:px-6">
+      <div className="flex min-w-0 items-center gap-2">
+        {/* Hamburger (mobile only) */}
+        {onMenuClick && (
+          <button
+            type="button"
+            onClick={onMenuClick}
+            aria-label="Open navigation menu"
+            className="-ml-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-secondary transition-colors hover:bg-qod-bg hover:text-primary lg:hidden"
+          >
+            <Menu className="h-5 w-5" />
+          </button>
+        )}
+
+        {/* Breadcrumbs — collapse intermediate crumbs to current page on <sm */}
+        <nav className="flex min-w-0 items-center gap-1 overflow-hidden text-sm">
+          {breadcrumbs.map((crumb, i) => {
+            const isLast = i === breadcrumbs.length - 1;
+            // On <sm, only render the last crumb; the hamburger + drawer carry navigation context.
+            const hideOnMobile = !isLast;
+            return (
+              <span
+                key={crumb.href}
+                className={cn(
+                  'flex min-w-0 items-center gap-1',
+                  hideOnMobile && 'hidden sm:flex',
+                )}
               >
-                {crumb.label}
-              </Link>
-            )}
-          </span>
-        ))}
-      </nav>
+                {i > 0 && <ChevronRight className="h-3 w-3 shrink-0 text-muted" />}
+                {isLast ? (
+                  <span className="truncate font-medium text-primary">{crumb.label}</span>
+                ) : (
+                  <Link
+                    href={crumb.href}
+                    className="truncate text-muted transition-colors hover:text-primary"
+                  >
+                    {crumb.label}
+                  </Link>
+                )}
+              </span>
+            );
+          })}
+        </nav>
+      </div>
 
       {/* Right section */}
-      <div className="flex items-center gap-3">
+      <div className="flex shrink-0 items-center gap-2 sm:gap-3">
         {/* Demo Mode toggle */}
         <button
           onClick={toggleDemoMode}

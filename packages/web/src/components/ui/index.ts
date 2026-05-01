@@ -11,3 +11,13 @@ export { SearchInput, type SearchInputProps } from './search-input';
 export { Select, type SelectProps, type SelectOption } from './select';
 export { ErrorBoundary } from './error-boundary';
 export { Skeleton, TableSkeleton, ChartSkeleton, StatCardSkeleton } from './skeleton';
+export {
+  Dialog,
+  Sheet,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogBody,
+  type DialogProps,
+  type SheetProps,
+} from './dialog';
