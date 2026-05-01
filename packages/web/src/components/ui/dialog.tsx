@@ -34,8 +34,8 @@ export interface SheetProps extends DialogProps {
 interface DialogContextValue {
   titleId: string;
   descriptionId: string;
-  registerTitle: () => void;
-  registerDescription: () => void;
+  registerTitle: (registered: boolean) => void;
+  registerDescription: (registered: boolean) => void;
 }
 
 const DialogContext = createContext<DialogContextValue | null>(null);
@@ -148,7 +148,12 @@ function useDialogShell(open: boolean, onClose: () => void, closeOnEsc: boolean)
   const triggerRef = useRef<HTMLElement | null>(null);
   const titleId = useId();
   const descriptionId = useId();
-  const hasTitleRef = useRef(false);
+  // Track whether DialogTitle / DialogDescription were actually rendered so
+  // we only emit aria-labelledby / aria-describedby for IDs that exist in
+  // the DOM. aria-labelledby pointing at a missing id would override
+  // ariaLabel in some screen readers and leave the dialog unlabeled.
+  const [hasTitle, setHasTitle] = useState(false);
+  const [hasDescription, setHasDescription] = useState(false);
   // Stable per-component identity used as the top-of-stack token.
   const [stackHandle] = useState(() => ({}));
 
@@ -237,36 +242,35 @@ function useDialogShell(open: boolean, onClose: () => void, closeOnEsc: boolean)
     };
   }, [active, onClose, closeOnEsc, stackHandle]);
 
-  // Dev-only warning if no DialogTitle was rendered (after first paint).
+  // Dev-only warning if neither a DialogTitle nor an ariaLabel was provided.
+  // We don't have ariaLabel here (lives on the public component), so the
+  // caller-side check is "no title rendered AND component didn't supply
+  // ariaLabel"; we surface only the title half here.
   useEffect(() => {
     if (!active) return;
     if (process.env.NODE_ENV === 'production') return;
     const id = window.setTimeout(() => {
-      if (!hasTitleRef.current) {
+      if (!hasTitle) {
 
         console.warn(
-          '[Dialog] No <DialogTitle> rendered. Dialogs should provide an accessible title for screen readers.',
+          '[Dialog] No <DialogTitle> rendered. Provide one or pass an `ariaLabel` prop so the dialog has an accessible name.',
         );
       }
     }, 0);
     return () => window.clearTimeout(id);
-  }, [active]);
+  }, [active, hasTitle]);
 
   const ctx = useMemo<DialogContextValue>(
     () => ({
       titleId,
       descriptionId,
-      registerTitle: () => {
-        hasTitleRef.current = true;
-      },
-      registerDescription: () => {
-        // Tracked for parity with title; no warning attached.
-      },
+      registerTitle: setHasTitle,
+      registerDescription: setHasDescription,
     }),
     [titleId, descriptionId],
   );
 
-  return { containerRef, ctx, active };
+  return { containerRef, ctx, active, hasTitle, hasDescription };
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +286,11 @@ export function Dialog({
   closeOnEsc = true,
   ariaLabel,
 }: DialogProps) {
-  const { containerRef, ctx, active } = useDialogShell(open, onClose, closeOnEsc);
+  const { containerRef, ctx, active, hasTitle, hasDescription } = useDialogShell(
+    open,
+    onClose,
+    closeOnEsc,
+  );
   if (!active) return null;
   return createPortal(
     <div
@@ -295,9 +303,9 @@ export function Dialog({
         ref={containerRef}
         role="dialog"
         aria-modal="true"
-        aria-labelledby={ctx.titleId}
-        aria-describedby={ctx.descriptionId}
-        aria-label={ariaLabel}
+        aria-labelledby={hasTitle ? ctx.titleId : undefined}
+        aria-describedby={hasDescription ? ctx.descriptionId : undefined}
+        aria-label={hasTitle ? undefined : ariaLabel}
         tabIndex={-1}
         className={cn(
           'w-full max-w-lg max-h-[calc(100dvh-1rem)] overflow-y-auto rounded-lg border border-qod-border bg-qod-surface shadow-2xl outline-none',
@@ -321,7 +329,11 @@ export function Sheet({
   closeOnEsc = true,
   ariaLabel,
 }: SheetProps) {
-  const { containerRef, ctx, active } = useDialogShell(open, onClose, closeOnEsc);
+  const { containerRef, ctx, active, hasTitle, hasDescription } = useDialogShell(
+    open,
+    onClose,
+    closeOnEsc,
+  );
   if (!active) return null;
 
   const sideClasses: Record<SheetSide, string> = {
@@ -342,9 +354,9 @@ export function Sheet({
         ref={containerRef}
         role="dialog"
         aria-modal="true"
-        aria-labelledby={ctx.titleId}
-        aria-describedby={ctx.descriptionId}
-        aria-label={ariaLabel}
+        aria-labelledby={hasTitle ? ctx.titleId : undefined}
+        aria-describedby={hasDescription ? ctx.descriptionId : undefined}
+        aria-label={hasTitle ? undefined : ariaLabel}
         tabIndex={-1}
         className={cn(
           'fixed bg-qod-surface shadow-2xl outline-none overflow-y-auto',
@@ -400,7 +412,8 @@ export function DialogTitle({
   const ctx = useContext(DialogContext);
   const register = ctx?.registerTitle;
   useEffect(() => {
-    register?.();
+    register?.(true);
+    return () => register?.(false);
   }, [register]);
   return (
     <h2
@@ -422,7 +435,8 @@ export function DialogDescription({
   const ctx = useContext(DialogContext);
   const register = ctx?.registerDescription;
   useEffect(() => {
-    register?.();
+    register?.(true);
+    return () => register?.(false);
   }, [register]);
   return (
     <p id={ctx?.descriptionId} className={cn('text-xs text-muted', className)}>
