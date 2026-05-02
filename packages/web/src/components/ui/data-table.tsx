@@ -22,6 +22,21 @@ export interface DataTablePagination {
 export interface DataTableProps<T> {
   columns: DataTableColumn<T>[];
   data: T[];
+  /**
+   * Stable per-row React key. Required: replaces the previous index-keying
+   * which was brittle on resort and breaks once the same data is rendered in
+   * two DOM shapes (table on >=md, card list on <md) at different breakpoints.
+   */
+  getRowKey: (row: T, idx: number) => string;
+  /**
+   * Optional. When provided, renders an <ul> of cards on <md (using a
+   * `hidden md:block` table + `md:hidden` list pair). Receives the same
+   * sorted/paginated data as the table; the desktop table renders unchanged.
+   * Card click behaviour is the caller's responsibility — `onRowClick` is
+   * not auto-applied to cards because card rows usually contain their own
+   * tappable controls.
+   */
+  mobileCard?: (row: T) => ReactNode;
   onRowClick?: (row: T) => void;
   emptyMessage?: string;
   pagination?: DataTablePagination;
@@ -48,6 +63,8 @@ function getNestedValue(obj: unknown, path: string): unknown {
 export function DataTable<T extends Record<string, unknown>>({
   columns,
   data,
+  getRowKey,
+  mobileCard,
   onRowClick,
   emptyMessage = 'No data available',
   pagination,
@@ -95,7 +112,28 @@ export function DataTable<T extends Record<string, unknown>>({
     : 0;
 
   return (
-    <div className={cn('overflow-x-auto', className)}>
+    <div className={cn(className)}>
+      {mobileCard && (
+        <ul role="list" className="md:hidden divide-y divide-qod-border/60">
+          {sortedData.length === 0 ? (
+            <li className="px-4 py-12 text-center text-muted">{emptyMessage}</li>
+          ) : (
+            sortedData.map((row, idx) => (
+              <li
+                key={getRowKey(row, idx)}
+                className={cn(
+                  'transition-colors',
+                  onRowClick && 'cursor-pointer hover:bg-qod-bg',
+                )}
+                onClick={onRowClick ? () => onRowClick(row) : undefined}
+              >
+                {mobileCard(row)}
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+      <div className={cn('overflow-x-auto', mobileCard && 'hidden md:block')}>
       <table className="w-full text-sm text-left">
         <thead>
           <tr className="border-b border-qod-border">
@@ -152,7 +190,7 @@ export function DataTable<T extends Record<string, unknown>>({
           ) : (
             sortedData.map((row, idx) => (
               <tr
-                key={idx}
+                key={getRowKey(row, idx)}
                 className={cn(
                   'border-b border-qod-border/50 transition-colors',
                   idx % 2 === 1 && 'bg-qod-bg/30',
@@ -173,6 +211,7 @@ export function DataTable<T extends Record<string, unknown>>({
           )}
         </tbody>
       </table>
+      </div>
 
       {pagination && totalPages > 1 && (
         <div className="flex items-center justify-between border-t border-qod-border px-4 py-3">

@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { useKPIDashboard, useDefectFilterOptions, useCoverageData } from '@/lib/api/hooks';
 import { useChartColors } from '@/lib/hooks/use-chart-colors';
+import { ChartFrame } from '@/components/charts/chart-frame';
 import { StatCard } from '@/components/ui/stat-card';
 import { cn } from '@/lib/utils/cn';
 import type { KPICard } from '@/lib/demo/demo-data-provider';
@@ -505,7 +506,7 @@ export default function KPIDashboardPage() {
         </div>
 
         {/* Line chart */}
-        <div className="h-72 px-3 pb-4">
+        <ChartFrame size="lg" className="px-3 pb-4">
           {detailChartData.length === 0 ? (
             <div className="flex h-full items-center justify-center">
               <p className="text-sm text-muted">No historical data available for this metric yet.</p>
@@ -584,7 +585,7 @@ export default function KPIDashboardPage() {
             </LineChart>
           </ResponsiveContainer>
           )}
-        </div>
+        </ChartFrame>
       </div>
     </div>
   );

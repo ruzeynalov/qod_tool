@@ -44,6 +44,8 @@ import {
   type DataTableColumn,
 } from '@/components/ui';
 import { useChartColors } from '@/lib/hooks/use-chart-colors';
+import { ChartFrame } from '@/components/charts/chart-frame';
+import { FilterSheet } from '@/components/layout/filter-sheet';
 import { cn } from '@/lib/utils/cn';
 import type { DemoDefect } from '@qod/shared';
 import type { DailyDefectTrend } from '@/lib/demo/demo-data-provider';
@@ -525,7 +527,7 @@ export default function DefectsPage() {
                   Open Defect Burndown
                 </h4>
               </div>
-              <div className="h-52">
+              <ChartFrame size="sm">
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart
                     data={burndownData}
@@ -573,7 +575,7 @@ export default function DefectsPage() {
                     />
                   </AreaChart>
                 </ResponsiveContainer>
-              </div>
+              </ChartFrame>
             </Card>
           </div>
         </div>
@@ -638,7 +640,7 @@ export default function DefectsPage() {
               className="w-36"
             />
           </div>
-          <div className="h-64">
+          <ChartFrame size="md">
             {trendLoading ? (
               <div className="flex h-full items-center justify-center">
                 <Spinner />
@@ -646,7 +648,7 @@ export default function DefectsPage() {
             ) : (
               <DefectTrend data={trendChartData} />
             )}
-          </div>
+          </ChartFrame>
         </Card>
 
         {/* Severity Breakdown */}
@@ -656,7 +658,7 @@ export default function DefectsPage() {
               Severity Breakdown
             </h3>
           </div>
-          <div className="h-64">
+          <ChartFrame size="md">
             {severityLoading ? (
               <div className="flex h-full items-center justify-center">
                 <Spinner />
@@ -669,7 +671,7 @@ export default function DefectsPage() {
                 }))}
               />
             ) : null}
-          </div>
+          </ChartFrame>
         </Card>
       </div>
 
@@ -683,7 +685,7 @@ export default function DefectsPage() {
             How long open defects have been unresolved
           </p>
         </div>
-        <div className="h-48">
+        <ChartFrame size="sm">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart
               data={ageBuckets}
@@ -720,7 +722,7 @@ export default function DefectsPage() {
               </Bar>
             </BarChart>
           </ResponsiveContainer>
-        </div>
+        </ChartFrame>
       </Card>
 
       {/* ── Defect Table ──────────────────────────────────────────── */}
@@ -730,8 +732,8 @@ export default function DefectsPage() {
             All Defects
           </h3>
 
-          {/* Filters */}
-          <div className="flex flex-wrap items-center gap-2">
+          {/* Filters — desktop inline row */}
+          <div className="hidden md:flex flex-wrap items-center gap-2">
             <SearchInput
               value={search}
               onChange={(val) => {
@@ -777,6 +779,63 @@ export default function DefectsPage() {
               }}
               className="w-36"
             />
+          </div>
+
+          {/* Filters — mobile sheet */}
+          <div className="md:hidden flex items-center gap-2">
+            <SearchInput
+              value={search}
+              onChange={(val) => {
+                setSearch(val);
+                setPage(1);
+              }}
+              placeholder="Search defects..."
+              className="min-w-0 flex-1"
+            />
+            <FilterSheet
+              activeCount={
+                (severityFilter ? 1 : 0) +
+                (statusFilter ? 1 : 0) +
+                (componentFilter ? 1 : 0) +
+                (labelFilter ? 1 : 0)
+              }
+              onReset={() => {
+                setSeverityFilter('');
+                setStatusFilter('');
+                setComponentFilter('');
+                setLabelFilter('');
+                setPage(1);
+              }}
+            >
+              <Select
+                options={SEVERITY_OPTIONS}
+                value={severityFilter}
+                onChange={(val) => { setSeverityFilter(val); setPage(1); }}
+                aria-label="Severity"
+                className="w-full"
+              />
+              <Select
+                options={STATUS_OPTIONS}
+                value={statusFilter}
+                onChange={(val) => { setStatusFilter(val); setPage(1); }}
+                aria-label="Status"
+                className="w-full"
+              />
+              <Select
+                options={componentOptions}
+                value={componentFilter}
+                onChange={(val) => { setComponentFilter(val); setPage(1); }}
+                aria-label="Component"
+                className="w-full"
+              />
+              <Select
+                options={labelOptions}
+                value={labelFilter}
+                onChange={(val) => { setLabelFilter(val); setPage(1); }}
+                aria-label="Label"
+                className="w-full"
+              />
+            </FilterSheet>
           </div>
         </div>
 

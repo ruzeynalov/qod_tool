@@ -1,15 +1,18 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Plus, Pencil, Trash2, ShieldCheck, ShieldOff, KeyRound,
   UserPlus, Users as UsersIcon, X, Copy, Check, ShieldAlert,
+  MoreHorizontal,
 } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
+import { DataTable, type DataTableColumn } from '@/components/ui/data-table';
+import { Sheet, DialogHeader, DialogTitle, DialogBody } from '@/components/ui/dialog';
 import { useAuth } from '@/app/_providers/auth-provider';
 import {
   useUsers,
@@ -734,116 +737,14 @@ export default function UsersPage() {
 
       {/* Users Table */}
       <Card padding="sm" className="overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-qod-border text-left">
-                <th className="px-4 py-3 text-xs font-semibold text-secondary uppercase tracking-wider">
-                  Name
-                </th>
-                <th className="px-4 py-3 text-xs font-semibold text-secondary uppercase tracking-wider">
-                  Username
-                </th>
-                <th className="px-4 py-3 text-xs font-semibold text-secondary uppercase tracking-wider">
-                  Email
-                </th>
-                <th className="px-4 py-3 text-xs font-semibold text-secondary uppercase tracking-wider">
-                  Role
-                </th>
-                <th className="px-4 py-3 text-xs font-semibold text-secondary uppercase tracking-wider">
-                  Status
-                </th>
-                <th className="px-4 py-3 text-xs font-semibold text-secondary uppercase tracking-wider text-right">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-qod-border">
-              {userList.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-muted">
-                    No users found. Create one to get started.
-                  </td>
-                </tr>
-              ) : (
-                userList.map((u) => {
-                  const isSelf = currentUser?.id === u.id;
-                  return (
-                    <tr
-                      key={u.id}
-                      className={cn(
-                        'hover:bg-qod-bg/50 transition-colors',
-                        u.blockedAt && 'opacity-60',
-                      )}
-                    >
-                      <td className="px-4 py-3">
-                        <span className="font-medium text-primary">{u.name}</span>
-                        {isSelf && (
-                          <span className="ml-2 text-[10px] text-muted font-medium uppercase">(you)</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-secondary">{u.username}</td>
-                      <td className="px-4 py-3 text-secondary">{u.email}</td>
-                      <td className="px-4 py-3">
-                        <Badge variant={roleBadgeVariant(u.role)}>{u.role}</Badge>
-                      </td>
-                      <td className="px-4 py-3">
-                        <Badge variant={u.blockedAt ? 'error' : 'success'}>
-                          {u.blockedAt ? 'Blocked' : 'Active'}
-                        </Badge>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center justify-end gap-1">
-                          <button
-                            title="Edit user"
-                            onClick={() => setEditUser(u)}
-                            className="rounded p-1.5 text-secondary hover:text-primary hover:bg-qod-bg transition-colors"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            title="Regenerate password"
-                            onClick={() => setRegenUser(u)}
-                            className="rounded p-1.5 text-secondary hover:text-primary hover:bg-qod-bg transition-colors"
-                          >
-                            <KeyRound className="h-3.5 w-3.5" />
-                          </button>
-                          {!isSelf && (
-                            <>
-                              <button
-                                title={u.blockedAt ? 'Unblock user' : 'Block user'}
-                                onClick={() => setBlockUser(u)}
-                                className={cn(
-                                  'rounded p-1.5 transition-colors',
-                                  u.blockedAt
-                                    ? 'text-rag-green hover:text-rag-green hover:bg-rag-green/10'
-                                    : 'text-secondary hover:text-rag-amber hover:bg-rag-amber/10',
-                                )}
-                              >
-                                {u.blockedAt ? (
-                                  <ShieldCheck className="h-3.5 w-3.5" />
-                                ) : (
-                                  <ShieldOff className="h-3.5 w-3.5" />
-                                )}
-                              </button>
-                              <button
-                                title="Delete user"
-                                onClick={() => setDeleteUser(u)}
-                                className="rounded p-1.5 text-secondary hover:text-rag-red hover:bg-rag-red/10 transition-colors"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+        <UsersTableSection
+          users={userList}
+          currentUserId={currentUser?.id}
+          onEdit={setEditUser}
+          onRegen={setRegenUser}
+          onBlock={setBlockUser}
+          onDelete={setDeleteUser}
+        />
       </Card>
 
       {/* Dialogs */}
@@ -853,5 +754,236 @@ export default function UsersPage() {
       <BlockDialog open={!!blockUser} onClose={() => setBlockUser(null)} user={blockUser} />
       <DeleteUserDialog open={!!deleteUser} onClose={() => setDeleteUser(null)} user={deleteUser} />
     </div>
+  );
+}
+
+// ─── Table section ────────────────────────────────────────────────────
+//
+// Lifted out of the main component so it owns its own column + mobileCard
+// memos and a bit of overflow-menu state. Desktop renders the DataTable
+// with its 6 columns; mobile renders cards with 3 inline 44x44 actions
+// (Edit, Block-Unblock, Delete) plus a "..." overflow Sheet for the
+// less-frequent Regenerate password action. Self-row hides Block + Delete
+// (matching the desktop conditional).
+
+interface UsersTableSectionProps {
+  users: User[];
+  currentUserId: string | undefined;
+  onEdit: (u: User) => void;
+  onRegen: (u: User) => void;
+  onBlock: (u: User) => void;
+  onDelete: (u: User) => void;
+}
+
+function UsersTableSection({
+  users,
+  currentUserId,
+  onEdit,
+  onRegen,
+  onBlock,
+  onDelete,
+}: UsersTableSectionProps) {
+  const [overflowUser, setOverflowUser] = useState<User | null>(null);
+
+  const columns: DataTableColumn<User>[] = useMemo(
+    () => [
+      {
+        key: 'name',
+        header: 'Name',
+        render: (u: User) => (
+          <span className="font-medium text-primary">
+            {u.name}
+            {currentUserId === u.id && (
+              <span className="ml-2 text-[10px] text-muted font-medium uppercase">(you)</span>
+            )}
+          </span>
+        ),
+      },
+      {
+        key: 'username',
+        header: 'Username',
+        render: (u: User) => <span className="text-secondary">{u.username ?? '—'}</span>,
+      },
+      {
+        key: 'email',
+        header: 'Email',
+        render: (u: User) => <span className="text-secondary">{u.email}</span>,
+      },
+      {
+        key: 'role',
+        header: 'Role',
+        render: (u: User) => <Badge variant={roleBadgeVariant(u.role)}>{u.role}</Badge>,
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        render: (u: User) => (
+          <Badge variant={u.blockedAt ? 'error' : 'success'}>
+            {u.blockedAt ? 'Blocked' : 'Active'}
+          </Badge>
+        ),
+      },
+      {
+        key: 'actions',
+        header: 'Actions',
+        className: 'text-right',
+        render: (u: User) => {
+          const isSelf = currentUserId === u.id;
+          return (
+            <div className="flex items-center justify-end gap-1">
+              <button
+                title="Edit user"
+                onClick={() => onEdit(u)}
+                className="rounded p-1.5 text-secondary hover:text-primary hover:bg-qod-bg transition-colors"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+              <button
+                title="Regenerate password"
+                onClick={() => onRegen(u)}
+                className="rounded p-1.5 text-secondary hover:text-primary hover:bg-qod-bg transition-colors"
+              >
+                <KeyRound className="h-3.5 w-3.5" />
+              </button>
+              {!isSelf && (
+                <>
+                  <button
+                    title={u.blockedAt ? 'Unblock user' : 'Block user'}
+                    onClick={() => onBlock(u)}
+                    className={cn(
+                      'rounded p-1.5 transition-colors',
+                      u.blockedAt
+                        ? 'text-rag-green hover:text-rag-green hover:bg-rag-green/10'
+                        : 'text-secondary hover:text-rag-amber hover:bg-rag-amber/10',
+                    )}
+                  >
+                    {u.blockedAt ? (
+                      <ShieldCheck className="h-3.5 w-3.5" />
+                    ) : (
+                      <ShieldOff className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                  <button
+                    title="Delete user"
+                    onClick={() => onDelete(u)}
+                    className="rounded p-1.5 text-secondary hover:text-rag-red hover:bg-rag-red/10 transition-colors"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </>
+              )}
+            </div>
+          );
+        },
+      },
+    ],
+    [currentUserId, onEdit, onRegen, onBlock, onDelete],
+  );
+
+  return (
+    <>
+      <DataTable
+        columns={columns as any}
+        data={users as any}
+        getRowKey={(u: any) => u.id}
+        emptyMessage="No users found. Create one to get started."
+        mobileCard={(u: any) => {
+          const isSelf = currentUserId === u.id;
+          return (
+            <div className={cn('px-4 py-3', u.blockedAt && 'opacity-70')}>
+              <div className="flex items-start gap-2">
+                <span className="min-w-0 flex-1 truncate text-sm font-medium text-primary">
+                  {u.name}
+                  {isSelf && (
+                    <span className="ml-2 text-[10px] text-muted font-medium uppercase">(you)</span>
+                  )}
+                </span>
+                <Badge variant={roleBadgeVariant(u.role)}>{u.role}</Badge>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+                {u.username && <span>{u.username}</span>}
+                <span className="truncate">{u.email}</span>
+              </div>
+              <div className="mt-2 flex items-center gap-1">
+                <Badge variant={u.blockedAt ? 'error' : 'success'}>
+                  {u.blockedAt ? 'Blocked' : 'Active'}
+                </Badge>
+                <div className="ml-auto flex items-center gap-1">
+                  <button
+                    type="button"
+                    aria-label="Edit user"
+                    onClick={() => onEdit(u)}
+                    className="flex h-11 w-11 items-center justify-center rounded text-secondary hover:bg-qod-bg hover:text-primary"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                  {!isSelf && (
+                    <>
+                      <button
+                        type="button"
+                        aria-label={u.blockedAt ? 'Unblock user' : 'Block user'}
+                        onClick={() => onBlock(u)}
+                        className={cn(
+                          'flex h-11 w-11 items-center justify-center rounded transition-colors',
+                          u.blockedAt
+                            ? 'text-rag-green hover:bg-rag-green/10'
+                            : 'text-secondary hover:bg-rag-amber/10 hover:text-rag-amber',
+                        )}
+                      >
+                        {u.blockedAt ? (
+                          <ShieldCheck className="h-4 w-4" />
+                        ) : (
+                          <ShieldOff className="h-4 w-4" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Delete user"
+                        onClick={() => onDelete(u)}
+                        className="flex h-11 w-11 items-center justify-center rounded text-secondary hover:bg-rag-red/10 hover:text-rag-red"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    aria-label="More actions"
+                    onClick={() => setOverflowUser(u)}
+                    className="flex h-11 w-11 items-center justify-center rounded text-secondary hover:bg-qod-bg hover:text-primary"
+                  >
+                    <MoreHorizontal className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        }}
+      />
+
+      <Sheet
+        open={!!overflowUser}
+        onClose={() => setOverflowUser(null)}
+        side="bottom"
+        className="bg-qod-surface p-0"
+      >
+        <DialogHeader onClose={() => setOverflowUser(null)}>
+          <DialogTitle>More actions</DialogTitle>
+        </DialogHeader>
+        <DialogBody className="space-y-1 px-2 py-2">
+          <button
+            type="button"
+            onClick={() => {
+              if (overflowUser) onRegen(overflowUser);
+              setOverflowUser(null);
+            }}
+            className="flex w-full items-center gap-3 rounded-md px-3 py-3 text-left text-sm text-primary hover:bg-qod-bg"
+          >
+            <KeyRound className="h-4 w-4 text-muted" />
+            <span>Regenerate password</span>
+          </button>
+        </DialogBody>
+      </Sheet>
+    </>
   );
 }

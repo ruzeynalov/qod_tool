@@ -11,6 +11,7 @@ import {
   type TooltipProps,
 } from 'recharts';
 import { useChartColors } from '@/lib/hooks/use-chart-colors';
+import { useMediaQuery } from '@/lib/utils/use-media-query';
 
 interface PassRateDataPoint {
   date: string;
@@ -24,6 +25,8 @@ interface PassRateTrendProps {
 
 export function PassRateTrend({ data }: PassRateTrendProps) {
   const chartColors = useChartColors();
+  const isWide = useMediaQuery('(min-width: 640px)');
+  const tickFont = isWide ? 12 : 11;
   const hasTarget = data.some((d) => d.target != null);
 
   const renderTooltip = ({ active, payload, label }: TooltipProps<number, string>) => {
@@ -52,14 +55,14 @@ export function PassRateTrend({ data }: PassRateTrendProps) {
         <XAxis
           dataKey="date"
           stroke={chartColors.axis}
-          fontSize={12}
+          fontSize={tickFont}
           tickLine={false}
           axisLine={{ stroke: chartColors.grid }}
         />
         <YAxis
           domain={[0, 100]}
           stroke={chartColors.axis}
-          fontSize={12}
+          fontSize={tickFont}
           tickLine={false}
           axisLine={{ stroke: chartColors.grid }}
           tickFormatter={(v: number) => `${v}%`}
