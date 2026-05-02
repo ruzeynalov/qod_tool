@@ -28,7 +28,12 @@ So that the deltas below are unambiguous:
 ## 1. Phase 2 — Tables, tabs, charts, filters
 
 **Scope target:** ~1¼ days of dev. Estimated **~450 LOC additive**.
-**PR shape:** one PR with the `DataTable` API change + all 5 callsite migrations + bespoke-table mobile cards + Tabs scroll + chart wrappers + filter-sheet pattern. Splittable into 2 PRs only if review bandwidth demands it (split line: API change alone vs everything else).
+
+**PR shape:** **one PR**, by explicit decision. Codex (round 1 review on this doc) recommended splitting Phase 2 into two PRs — table contract/migration in PR-A (DataTable API + 5 callsite migrations + Users), and layout/polish in PR-B (Alerts cards + Tabs scroll + charts + filter-sheet). The user has overridden that recommendation: **all of Phase 2 ships as a single PR.** The trade-offs that informed the override:
+
+- *For combining*: the `DataTable` API change is load-bearing for every other Phase 2 sub-task, the dependency chain is short (Tabs / charts / filter-sheet don't depend on the table change but DO share the same review context), and a single PR keeps reviewers loaded once instead of twice.
+- *Against combining (acknowledged)*: the resulting PR is large (~450 LOC across ~12 files), so reviewers must be deliberate about reading it in passes; CI cycle time on amendments is higher; a botched migration on a single callsite blocks the whole PR.
+- *Mitigations carried forward*: each Phase 2 sub-section below (1.1 through 1.6) is structured so it can be reviewed independently, with its own acceptance criteria. The PR description should mirror those section headings so reviewers can sweep one area at a time.
 
 ### 1.1 `DataTable` API change — `components/ui/data-table.tsx`
 
@@ -171,26 +176,18 @@ export function ChartFrame({ size = 'md', children }: {
 }
 ```
 
-For **axis font size**, add a single hook:
+For **axis font size**, **do not** add a dedicated hook — the breakpoint delta is 1 px across 5 sites and a `matchMedia` subscription per chart is more machinery than the problem warrants. Instead, derive the value from the single `useMediaQuery('(min-width: 640px)')` hook introduced for Phase 3 (§2.2), called once in each page that owns the charts:
 
 ```tsx
-// components/charts/use-responsive-tick-font.ts
-export function useResponsiveTickFont() {
-  const [size, setSize] = useState(11);
-  useEffect(() => {
-    const mq = window.matchMedia('(min-width: 640px)');
-    const update = () => setSize(mq.matches ? 12 : 11);
-    update();
-    mq.addEventListener('change', update);
-    return () => mq.removeEventListener('change', update);
-  }, []);
-  return size;
-}
+// inside e.g. defects/page.tsx render
+const isCompact = !useMediaQuery('(min-width: 640px)');
+const tickFont = isCompact ? 11 : 12;
+// pass `tick={{ fontSize: tickFont }}` to every Recharts axis on the page
 ```
 
 Then per-chart:
 - Replace bare `h-64` / `h-72` / `h-48` divs with `<ChartFrame size="md">` / `"lg"` / `"sm"`.
-- Replace `tick={{ fontSize: 12 }}` with `tick={{ fontSize: useResponsiveTickFont() }}`.
+- Replace `tick={{ fontSize: 12 }}` with `tick={{ fontSize: tickFont }}` using the page-level value above.
 - For multi-series charts with a legend, add `<Legend wrapperStyle={{ fontSize: 11 }} verticalAlign="bottom" />` on `<sm` (default desktop position is unchanged — Recharts' default).
 
 Acceptance: at 375 px each chart is at least 220 px tall, axis labels don't collide, no truncation in tick labels.
@@ -325,7 +322,7 @@ Existing `Sheet` widths cover both:
 - `side="right"` desktop: existing `w-72 max-w-[85vw]` from the primitive — too narrow vs current 448 px. Add a width override via the `className` prop: `lg:w-[28rem] lg:max-w-[28rem]`.
 - `side="bottom"` mobile: existing `inset-x-0 bottom-0 max-h-[85dvh]`.
 
-Acceptance: tapping a test row on the Coverage test cases card list opens the same drawer it always did, but on `<sm` it slides up from the bottom and is dismissed by Esc / backdrop / drag.
+Acceptance: tapping a test row on the Coverage test cases card list opens the same drawer it always did, but on `<sm` it slides up from the bottom and is dismissed by **Esc or backdrop tap**. Swipe-to-dismiss is **out of scope for this phase** — the shared `Sheet` primitive currently exposes only `Esc` and backdrop close (`components/ui/dialog.tsx`); adding a pointer-gesture handler would be a primitive change and is tracked separately in Phase 5 if user testing surfaces a real need.
 
 ### 2.3 iOS auto-zoom audit
 
@@ -364,7 +361,12 @@ Implementation:
 - Renders in the page title row on `<lg` (small inline `<select>` with project count badge).
 - Renders inside the mobile drawer (`MobileNav`) on `<lg` so the user can switch projects from the hamburger.
 - Data source: existing `useProjects()` hook from `lib/api/hooks.ts`.
-- Navigation: `router.push('/projects/<id>')` keeps the user on the equivalent sub-route if possible (best-effort: read current `pathname.split('/').slice(3).join('/')` and re-attach to the new project id; fall back to project overview).
+- Navigation: `router.push(targetUrl)` where `targetUrl` is computed via a **conservative whitelist of known shared sub-routes** — `coverage`, `runs`, `defects`, `kpis`, `alerts`, `settings`. The algorithm:
+  1. `parts = pathname.split('/').filter(Boolean)` → e.g. `['projects', 'demo-banking', 'coverage']`.
+  2. If `parts[0] === 'projects'` and `parts.length >= 3` and `parts[2]` is in the whitelist, build `/projects/<newId>/<parts[2]>`.
+  3. Otherwise fall back to `/projects/<newId>` (project overview).
+  4. **Drop query strings, hashes, and any deeper segments** — `parts[3+]` is intentionally ignored. Carrying e.g. `?status=open` or `#defect-42` into a different project would point at filters or rows that may not exist there, ranging from "meaningless" to "broken" (deep-linked alert log anchors, expanded epic rows, defect ids).
+- Aria: the trigger is a `<select>` (or `combobox`-role button) with an explicit `aria-label="Switch project"`; option labels are project names (not ids).
 
 ### 2.7 Phase 3 acceptance criteria
 
@@ -411,45 +413,97 @@ Update CI (`.github/workflows/ci.yml:99-130`) to run the new mobile projects on 
 
 ### 3.2 `e2e/mobile-smoke.spec.ts` (new)
 
-Routes covered: `/`, `/projects`, `/projects/[demo-id]`, `/projects/[demo-id]/kpis`, `/projects/[demo-id]/runs`, `/projects/[demo-id]/defects`, `/projects/[demo-id]/coverage`, `/projects/[demo-id]/settings`, `/users`.
+**Use the existing fixtures.** `packages/web/e2e/fixtures/demo-mode.ts` already exports:
+- `test` — a Playwright test that pre-seeds `qod-demo-mode=true` in `localStorage`, skipping the login gate.
+- `DEMO_PROJECTS` — the canonical demo project ids: `demo-ecommerce`, `demo-banking`, `demo-internal`. The doc previously used a fictional `demo-1` which would 404; the spec MUST import from this fixture.
 
-For each route, two assertions on each mobile viewport:
+**Routes covered** (8 unauthenticated demo-mode routes, plus 1 admin-gated):
 
 ```ts
-test('no horizontal body scroll', async ({ page }) => {
-  await page.goto(route);
-  await expect(page.evaluate(() => {
-    return document.documentElement.scrollWidth - document.documentElement.clientWidth;
-  })).resolves.toBeLessThanOrEqual(1); // sub-pixel slack
-});
+import { DEMO_PROJECTS } from './fixtures/demo-mode';
+const PID = DEMO_PROJECTS.ecommerce.id; // 'demo-ecommerce'
 
-test('hamburger opens drawer and traps focus', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: /open navigation menu/i }).click();
-  // First focusable inside drawer should be focused
-  await expect(page.getByRole('dialog')).toBeVisible();
-  // Tab once — focus should still be inside the dialog
-  await page.keyboard.press('Tab');
-  const inside = await page.evaluate(() => {
-    const d = document.querySelector('[role="dialog"]');
-    return d?.contains(document.activeElement);
-  });
-  expect(inside).toBe(true);
-  // Esc closes; focus returns to hamburger
-  await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog')).toBeHidden();
-  await expect(page.getByRole('button', { name: /open navigation menu/i })).toBeFocused();
+const PUBLIC_ROUTES = [
+  '/',
+  '/projects',
+  `/projects/${PID}`,
+  `/projects/${PID}/kpis`,
+  `/projects/${PID}/runs`,
+  `/projects/${PID}/defects`,
+  `/projects/${PID}/coverage`,
+  `/projects/${PID}/settings`,
+];
+// '/users' is admin-only — see admin fixture below.
+```
+
+**Admin fixture (new)** for the one admin-gated route. `packages/web/src/app/(dashboard)/users/page.tsx:676-688` shows an Access Denied screen when `!isAdmin`, and `auth-provider.tsx:75` derives `isAdmin` from `user?.role === 'ADMIN'`. Demo mode does NOT seed an auth user, so a vanilla `demoPage` would assert against the Access Denied screen instead of the user list.
+
+Add a sibling fixture `packages/web/e2e/fixtures/admin-mode.ts` (~25 LOC) that builds on `demoPage` and additionally seeds `qod-auth-token` and `qod-auth-user` with a synthetic admin user before navigation:
+
+```ts
+import { test as base } from './demo-mode';
+export const test = base.extend({
+  adminPage: async ({ page }, use) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('qod-auth-token', 'mobile-smoke-admin-token');
+      localStorage.setItem('qod-auth-user', JSON.stringify({
+        id: 'mobile-smoke-admin', email: 'admin@example.com',
+        name: 'Mobile Smoke Admin', role: 'ADMIN', orgId: 'demo-org',
+      }));
+    });
+    await use(page);
+  },
 });
 ```
 
-Spec file naming: `packages/web/e2e/mobile-smoke.spec.ts`. Estimated 200 LOC.
+`/users` is the only route in the smoke matrix that uses `adminPage`; everything else uses `demoPage` from the existing fixture.
+
+**Two assertions per route per mobile viewport:**
+
+```ts
+test('no horizontal body scroll', async ({ demoPage }) => {
+  await demoPage.goto(route);
+  const overflow = await demoPage.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(1); // sub-pixel slack
+});
+
+test('hamburger opens drawer and traps focus', async ({ demoPage }) => {
+  await demoPage.goto('/');
+  await demoPage.getByRole('button', { name: /open navigation menu/i }).click();
+  await expect(demoPage.getByRole('dialog')).toBeVisible();
+  await demoPage.keyboard.press('Tab');
+  const inside = await demoPage.evaluate(() => {
+    const d = document.querySelector('[role="dialog"]');
+    return d?.contains(document.activeElement) ?? false;
+  });
+  expect(inside).toBe(true);
+  await demoPage.keyboard.press('Escape');
+  await expect(demoPage.getByRole('dialog')).toBeHidden();
+  await expect(demoPage.getByRole('button', { name: /open navigation menu/i })).toBeFocused();
+});
+```
+
+Spec file: `packages/web/e2e/mobile-smoke.spec.ts`. Admin fixture: `packages/web/e2e/fixtures/admin-mode.ts`. Combined estimate ~220 LOC.
 
 ### 3.3 Visual regression baselines
 
 Use Playwright's built-in `toHaveScreenshot()` (no extra dep). One spec at `e2e/visual-regression.spec.ts`:
 
 ```ts
-const ROUTES = ['/', '/projects', '/projects/demo-1/kpis', '/projects/demo-1/runs', '/projects/demo-1/defects', '/projects/demo-1/coverage', '/projects/demo-1/settings'];
+import { test, expect, DEMO_PROJECTS } from './fixtures/demo-mode';
+const PID = DEMO_PROJECTS.ecommerce.id; // 'demo-ecommerce'
+
+const ROUTES = [
+  '/',
+  '/projects',
+  `/projects/${PID}/kpis`,
+  `/projects/${PID}/runs`,
+  `/projects/${PID}/defects`,
+  `/projects/${PID}/coverage`,
+  `/projects/${PID}/settings`,
+];
 const VIEWPORTS = [
   { name: 'mobile', width: 375, height: 812 },
   { name: 'desktop', width: 1280, height: 800 },
@@ -457,10 +511,10 @@ const VIEWPORTS = [
 
 for (const v of VIEWPORTS) {
   for (const r of ROUTES) {
-    test(`${v.name} ${r}`, async ({ page }) => {
-      await page.setViewportSize(v);
-      await page.goto(r, { waitUntil: 'networkidle' });
-      await expect(page).toHaveScreenshot(`${v.name}-${r.replace(/[/]/g, '_') || 'home'}.png`, {
+    test(`${v.name} ${r}`, async ({ demoPage }) => {
+      await demoPage.setViewportSize(v);
+      await demoPage.goto(r, { waitUntil: 'networkidle' });
+      await expect(demoPage).toHaveScreenshot(`${v.name}-${r.replace(/[/]/g, '_') || 'home'}.png`, {
         fullPage: true,
         animations: 'disabled',
         maxDiffPixelRatio: 0.005,
@@ -521,8 +575,8 @@ Acceptance: a11y ≥ 0.9 on mobile for the home page and projects listing. Best-
 
 ### 3.5 Phase 4 acceptance criteria
 
-- **Mobile smoke**: `mobile-smoke.spec.ts` passes on both `mobile-chromium` (iPhone 14, 393 px) and `mobile-chromium-narrow` (iPhone SE, 375 px) for all 9 routes.
-- **Visual regression**: baselines exist for 7 routes × 2 viewports (14 images). PRs that change layout produce a clean visual diff.
+- **Mobile smoke**: `mobile-smoke.spec.ts` passes on both `mobile-chromium` (iPhone 14, 393 px) and `mobile-chromium-narrow` (iPhone SE, 375 px). 8 routes use `demoPage` (8 public routes); `/users` uses `adminPage` (the new fixture).
+- **Visual regression**: baselines exist for 7 routes × 2 viewports (14 images), all driven by `demoPage` so no auth state pollutes the snapshot. PRs that change layout produce a clean visual diff.
 - **Lighthouse**: a11y ≥ 0.9 on mobile for home + projects.
 - **CI**: all 4 new checks (`mobile-chromium`, `mobile-chromium-narrow`, `visual-regression`, `lighthouse-mobile`) added to required-checks list (or at least to the merge-blocking set).
 
