@@ -32,6 +32,17 @@ export default defineConfig({
       name: 'webkit',
       use: { ...devices['Desktop Safari'] },
     },
+    // Mobile projects for the mobile-smoke + visual-regression specs.
+    // iPhone 14 covers the 393 px reference target (iPhone 16 / Pixel 8 are
+    // the same width class); iPhone SE 1 covers the 320 px lower bound.
+    {
+      name: 'mobile-chromium',
+      use: { ...devices['iPhone 14'] },
+    },
+    {
+      name: 'mobile-chromium-narrow',
+      use: { ...devices['iPhone SE'] },
+    },
   ],
 
   webServer: {
