@@ -66,7 +66,11 @@ export function FilterSheet({
           ) : (
             <span aria-hidden="true" />
           )}
-          <Button onClick={() => setOpen(false)}>Apply</Button>
+          {/* Filters apply live (the form controls inside this sheet mutate
+              the page's filter state on every onChange), so this button is
+              just a "Done" close affordance — naming it "Apply" would
+              suggest a deferred commit step that doesn't exist. */}
+          <Button onClick={() => setOpen(false)}>Done</Button>
         </div>
       </Sheet>
     </>

@@ -7,6 +7,8 @@ import { Select } from '@/components/ui/select';
 import { useProjects } from '@/lib/api/hooks';
 import { cn } from '@/lib/utils/cn';
 
+let didWarnLoadFailed = false;
+
 /**
  * Project switcher — appears in the desktop header (rendered as a popover
  * button so its options don't pollute the static DOM with the project names)
@@ -36,7 +38,16 @@ interface ProjectSwitcherProps {
 export function ProjectSwitcher({ className, variant = 'popover' }: ProjectSwitcherProps) {
   const router = useRouter();
   const pathname = usePathname() ?? '';
-  const { data: projects } = useProjects();
+  const { data: projects, isError, error } = useProjects();
+
+  // Surface a one-time dev-only warning if the projects query failed —
+  // otherwise we silently render `null` and the switcher just disappears
+  // from the UI with no signal to the user or developer.
+  if (isError && !didWarnLoadFailed && process.env.NODE_ENV !== 'production') {
+    didWarnLoadFailed = true;
+
+    console.warn('[ProjectSwitcher] useProjects failed; switcher hidden:', error);
+  }
 
   const parts = pathname.split('/').filter(Boolean);
   // Only render on /projects/[id]/... routes.

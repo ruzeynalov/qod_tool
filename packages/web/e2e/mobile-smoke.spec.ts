@@ -77,13 +77,37 @@ test.describe('mobile — hamburger drawer', () => {
     const dialog = demoPage.getByRole('dialog');
     await expect(dialog).toBeVisible();
 
-    // Tab once — focus should still be inside the dialog (focus trap).
-    await demoPage.keyboard.press('Tab');
-    const insideAfterTab = await demoPage.evaluate(() => {
-      const d = document.querySelector('[role="dialog"]');
-      return d?.contains(document.activeElement) ?? false;
-    });
-    expect(insideAfterTab).toBe(true);
+    // Tab through the dialog several times in both directions and confirm
+    // focus stays inside it the whole time. Pressing Tab once is too weak —
+    // a broken trap that leaks focus to <body> would still pass if focus
+    // happened to land on the first focusable element. Cycling +/- proves
+    // the trap holds at both ends.
+    const seen = new Set<string>();
+    for (let i = 0; i < 6; i++) {
+      await demoPage.keyboard.press('Tab');
+      const sample = await demoPage.evaluate(() => {
+        const d = document.querySelector('[role="dialog"]');
+        const a = document.activeElement as HTMLElement | null;
+        return {
+          inside: !!(d && a && d.contains(a)),
+          marker: a ? `${a.tagName}|${(a.textContent ?? '').slice(0, 30)}|${a.getAttribute('aria-label') ?? ''}` : '',
+        };
+      });
+      expect(sample.inside, `focus left dialog on Tab #${i + 1}`).toBe(true);
+      seen.add(sample.marker);
+    }
+    // Reverse direction — Shift+Tab still stays inside.
+    for (let i = 0; i < 3; i++) {
+      await demoPage.keyboard.press('Shift+Tab');
+      const inside = await demoPage.evaluate(() => {
+        const d = document.querySelector('[role="dialog"]');
+        return !!(d && d.contains(document.activeElement));
+      });
+      expect(inside, `focus left dialog on Shift+Tab #${i + 1}`).toBe(true);
+    }
+    // Trap should have visited at least 2 distinct focusables (otherwise the
+    // dialog has only one focusable and the test isn't meaningful).
+    expect(seen.size, 'focus trap cycled through more than one focusable').toBeGreaterThanOrEqual(2);
 
     // Esc closes the drawer; focus returns to the hamburger trigger.
     await demoPage.keyboard.press('Escape');

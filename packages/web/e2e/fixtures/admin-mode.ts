@@ -11,6 +11,11 @@ export const test = base.extend<{ adminPage: Page }>({
   adminPage: async ({ page }, use) => {
     await page.addInitScript(() => {
       localStorage.setItem('qod-demo-mode', 'true');
+      // Synthetic placeholder, intentionally not a real JWT. The frontend's
+      // AuthProvider uses this token only to gate `isAuthenticated` (truthy
+      // check on `qod-auth-token`); admin authorization is derived purely
+      // from `user.role === 'ADMIN'` in the user object below. No backend
+      // call validates this token in demo mode.
       localStorage.setItem('qod-auth-token', 'mobile-smoke-admin-token');
       localStorage.setItem(
         'qod-auth-user',

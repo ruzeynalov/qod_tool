@@ -26,8 +26,9 @@ export interface DataTableProps<T> {
    * Stable per-row React key. Required: replaces the previous index-keying
    * which was brittle on resort and breaks once the same data is rendered in
    * two DOM shapes (table on >=md, card list on <md) at different breakpoints.
+   * Returns string OR number — React coerces both to strings for keys.
    */
-  getRowKey: (row: T, idx: number) => string;
+  getRowKey: (row: T, idx: number) => string | number;
   /**
    * Optional. When provided, renders an <ul> of cards on <md (using a
    * `hidden md:block` table + `md:hidden` list pair). Receives the same

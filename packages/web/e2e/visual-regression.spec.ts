@@ -47,7 +47,11 @@ test.describe('visual regression', () => {
         await expect(demoPage).toHaveScreenshot(`${v.name}-${slug}.png`, {
           fullPage: true,
           animations: 'disabled',
-          maxDiffPixelRatio: 0.005,
+          // Start permissive while baselines stabilize — sub-pixel font
+          // rendering and chart anti-aliasing differ between local macOS
+          // and CI Linux. Tighten to 0.005 once baselines are recorded
+          // and a few CI runs confirm they're stable.
+          maxDiffPixelRatio: 0.01,
         });
       });
     }

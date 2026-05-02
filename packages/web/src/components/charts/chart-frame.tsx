@@ -19,6 +19,10 @@ import { cn } from '@/lib/utils/cn';
 export type ChartFrameSize = 'sm' | 'md' | 'lg';
 
 const HEIGHT_BY_SIZE: Record<ChartFrameSize, string> = {
+  // Note the deliberate dip on `sm` from sm:h-52 (208px) to lg:h-48 (192px):
+  // these compact charts (severity donut, age distribution) coexist with
+  // wide horizontal layouts at >=lg, so we want them just slightly shorter
+  // than at the tablet breakpoint where they have more vertical real estate.
   sm: 'h-44 sm:h-52 lg:h-48',
   md: 'h-56 sm:h-64 lg:h-64',
   lg: 'h-64 sm:h-72 lg:h-72',
