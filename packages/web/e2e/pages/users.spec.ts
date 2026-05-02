@@ -48,9 +48,14 @@ test.describe('User Management', () => {
   test('renders user management page with table', async ({ page }) => {
     await page.goto('/users');
     await expect(page.getByRole('heading', { name: /user management/i })).toBeVisible();
-    await expect(page.getByText('admin@qod.dev')).toBeVisible();
-    await expect(page.getByText('member@qod.dev')).toBeVisible();
-    await expect(page.getByText('blocked@qod.dev')).toBeVisible();
+    // The Users page renders both the desktop <table> and a parallel mobile
+    // card list (both fed by the same data) so each user email appears
+    // twice in the DOM. Scope to the desktop table here so the assertion
+    // is unambiguous regardless of viewport.
+    const table = page.getByRole('table');
+    await expect(table.getByText('admin@qod.dev')).toBeVisible();
+    await expect(table.getByText('member@qod.dev')).toBeVisible();
+    await expect(table.getByText('blocked@qod.dev')).toBeVisible();
   });
 
   test('create user dialog opens and submits', async ({ page }) => {

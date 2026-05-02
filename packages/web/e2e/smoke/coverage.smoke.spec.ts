@@ -32,8 +32,11 @@ test.describe('Coverage smoke', () => {
     await expect(table).toBeVisible();
     const initialCount = await table.locator('tbody tr').count();
 
-    // Search for something specific
-    await page.getByPlaceholder('Search test cases...').fill('payment');
+    // The page renders both the desktop filter row and a (md:hidden) mobile
+    // filter row that contains a SearchInput with the same placeholder, so
+    // a bare getByPlaceholder() resolves to two elements. Scope to the
+    // visible (desktop) input.
+    await page.getByPlaceholder('Search test cases...').first().fill('payment');
     await page.waitForTimeout(500); // debounce
 
     const filteredCount = await table.locator('tbody tr').count();

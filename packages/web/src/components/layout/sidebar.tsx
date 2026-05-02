@@ -217,9 +217,12 @@ export function MobileNav({ open, onClose }: MobileNavProps) {
         isAdmin={isAdmin}
         onNavigate={onClose}
       />
-      {/* Project switcher — only renders when the current path is under /projects/[id]/... */}
+      {/* Project switcher — only renders when the current path is under /projects/[id]/...
+          Uses the native <select> variant since the drawer is portal-mounted via Sheet
+          and only present in the DOM while open, so option text doesn't pollute the
+          static page DOM (which would break Playwright text queries). */}
       <div className="border-t border-qod-border px-3 py-3">
-        <ProjectSwitcher className="w-full" />
+        <ProjectSwitcher variant="select" className="w-full" />
       </div>
     </Sheet>
   );

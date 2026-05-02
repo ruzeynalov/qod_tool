@@ -43,11 +43,12 @@ test.describe('Happy path journey', () => {
     await expect(page.getByText('420').first()).toBeVisible(); // total test cases
 
     // Search for payment-related tests
-    await page.getByPlaceholder('Search test cases...').fill('payment');
+    // Mobile filter row also renders a SearchInput with this placeholder; scope to the first (desktop) one.
+    await page.getByPlaceholder('Search test cases...').first().fill('payment');
     await page.waitForTimeout(500);
     const table = page.locator('table').first();
     expect(await table.locator('tbody tr').count()).toBeGreaterThan(0);
-    await page.getByPlaceholder('Search test cases...').clear();
+    await page.getByPlaceholder('Search test cases...').first().clear();
     await page.waitForTimeout(500);
 
     // 5. Check run trends
