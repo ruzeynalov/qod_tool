@@ -64,11 +64,12 @@ function thresholdLabel(metric: string): string {
 
 // ── Shared input class ──────────────────────────────────────────────────
 
+// text-base on <sm prevents iOS Safari zoom-on-focus
 const inputClass =
-  'w-full rounded-md border border-qod-border bg-qod-surface px-3 py-2 text-sm text-primary placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent';
+  'w-full rounded-md border border-qod-border bg-qod-surface px-3 py-2 text-base text-primary placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent sm:text-sm';
 
 const selectClass =
-  'w-full rounded-md border border-qod-border bg-qod-surface px-3 py-2 text-sm text-primary focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent';
+  'w-full rounded-md border border-qod-border bg-qod-surface px-3 py-2 text-base text-primary focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent sm:text-sm';
 
 // ── Form state type ─────────────────────────────────────────────────────
 
@@ -241,8 +242,80 @@ export default function AlertRulesPage() {
         )}
       </div>
 
+      {/* Mobile cards (parallel to the table) */}
+      <ul className="md:hidden divide-y divide-qod-border/60 rounded-lg border border-qod-border bg-qod-surface" role="list">
+        {(!rules || rules.length === 0) ? (
+          <li className="px-4 py-12 text-center text-sm text-muted">
+            No alert rules configured yet. Tap &quot;Create Rule&quot; to add one.
+          </li>
+        ) : (
+          rules.map((rule) => (
+            <li key={rule.id} className="px-4 py-3">
+              <div className="flex items-start gap-2">
+                <span className="min-w-0 flex-1 text-sm font-medium text-primary">
+                  {METRIC_LABELS[rule.metric] ?? rule.metric}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleToggleEnabled(rule)}
+                  disabled={!isAdmin}
+                  className={cn(
+                    'relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-qod-accent/50',
+                    rule.enabled ? 'bg-qod-accent' : 'bg-qod-border',
+                    isAdmin ? 'cursor-pointer' : 'cursor-not-allowed opacity-60',
+                  )}
+                  role="switch"
+                  aria-checked={rule.enabled}
+                  aria-label="Toggle rule"
+                >
+                  <span
+                    className={cn(
+                      'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform',
+                      rule.enabled ? 'translate-x-4' : 'translate-x-0',
+                    )}
+                  />
+                </button>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+                <span>{CONDITION_LABELS[rule.condition] ?? rule.condition} {toDisplayThreshold(rule.metric, rule.threshold)}{HOURS_METRICS.has(rule.metric) ? 'd' : ''}</span>
+                <span>{CHANNEL_LABELS[rule.channel] ?? rule.channel}</span>
+                {rule.lastTriggered && (
+                  <span>
+                    last{' '}
+                    {new Date(rule.lastTriggered).toLocaleDateString('en-US', {
+                      month: 'short',
+                      day: 'numeric',
+                    })}
+                  </span>
+                )}
+              </div>
+              {isAdmin && (
+                <div className="mt-2 flex items-center justify-end gap-1">
+                  <button
+                    type="button"
+                    aria-label="Edit rule"
+                    onClick={() => openEdit(rule)}
+                    className="flex h-11 w-11 items-center justify-center rounded text-secondary hover:bg-qod-bg hover:text-primary"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Delete rule"
+                    onClick={() => openDelete(rule)}
+                    className="flex h-11 w-11 items-center justify-center rounded text-secondary hover:bg-rag-red/10 hover:text-rag-red"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              )}
+            </li>
+          ))
+        )}
+      </ul>
+
       {/* Table */}
-      <div className="overflow-x-auto rounded-lg border border-qod-border bg-qod-surface">
+      <div className="hidden md:block overflow-x-auto rounded-lg border border-qod-border bg-qod-surface">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-qod-border text-left">
@@ -627,7 +700,87 @@ function AlertLogSection({ projectId }: { projectId: string }) {
         </div>
       </div>
 
-      <div className="overflow-x-auto rounded-lg border border-qod-border bg-qod-surface">
+      {/* Mobile cards (parallel to the table) */}
+      <ul className="md:hidden divide-y divide-qod-border/60 rounded-lg border border-qod-border bg-qod-surface" role="list">
+        {isLoading ? (
+          <li className="px-4 py-10 text-center">
+            <Loader2 className="mx-auto h-5 w-5 animate-spin text-qod-accent" />
+          </li>
+        ) : items.length === 0 ? (
+          <li className="px-4 py-10 text-center text-sm text-muted">
+            {search ? 'No alerts match your search.' : 'No alerts logged yet.'}
+          </li>
+        ) : (
+          items.map((n) => (
+            <li
+              key={n.id}
+              id={`alert-log-mobile-${n.id}`}
+              className={cn(
+                'px-4 py-3',
+                !n.read && 'bg-qod-accent/5',
+                highlightId === n.id && 'ring-2 ring-qod-accent ring-inset bg-qod-accent/10',
+              )}
+            >
+              <div className="flex items-start gap-2">
+                {!n.read && (
+                  <span aria-hidden="true" className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-qod-accent" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-primary">{n.title}</div>
+                  <p className="mt-0.5 text-xs text-muted line-clamp-2">{n.body}</p>
+                </div>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+                <span>
+                  {new Date(n.createdAt).toLocaleString('en-US', {
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </span>
+                {n.alertRule && <span>{ruleDetails(n.alertRule)}</span>}
+                {n.muted && <span>muted</span>}
+                {n.alertRule && !n.alertRule.enabled && <span>disabled</span>}
+              </div>
+              <div className="mt-2 flex items-center justify-end gap-1">
+                <button
+                  type="button"
+                  aria-label={n.read ? 'Already read' : 'Mark as read'}
+                  onClick={() => !n.read && markRead.mutate(n.id)}
+                  disabled={n.read || markRead.isPending}
+                  className="flex h-11 w-11 items-center justify-center rounded text-secondary hover:bg-qod-bg hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Check className="h-4 w-4" />
+                </button>
+                {n.muted ? (
+                  <button
+                    type="button"
+                    aria-label="Unmute (restore to bell)"
+                    onClick={() => unmute.mutate(n.id)}
+                    disabled={unmute.isPending}
+                    className="flex h-11 w-11 items-center justify-center rounded text-qod-accent hover:bg-qod-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Bell className="h-4 w-4" />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    aria-label="Mute (hide from bell, keep in log)"
+                    onClick={() => mute.mutate(n.id)}
+                    disabled={mute.isPending}
+                    className="flex h-11 w-11 items-center justify-center rounded text-secondary hover:bg-rag-amber/10 hover:text-rag-amber disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <BellOff className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+            </li>
+          ))
+        )}
+      </ul>
+
+      <div className="hidden md:block overflow-x-auto rounded-lg border border-qod-border bg-qod-surface">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-qod-border text-left">

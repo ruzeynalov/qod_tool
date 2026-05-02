@@ -79,7 +79,8 @@ export function SearchInput({
         onChange={handleChange}
         placeholder={placeholder}
         className={cn(
-          'w-full rounded-md border border-qod-border bg-qod-surface py-2 pl-9 pr-8 text-sm text-primary placeholder:text-muted',
+          // text-base on <sm prevents iOS Safari zoom-on-focus
+          'w-full rounded-md border border-qod-border bg-qod-surface py-2 pl-9 pr-8 text-base text-primary sm:text-sm placeholder:text-muted',
           'focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent',
           'transition-colors',
         )}

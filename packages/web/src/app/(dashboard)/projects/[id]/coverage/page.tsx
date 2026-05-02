@@ -15,6 +15,7 @@ import {
   StatCard,
 } from '@/components/ui';
 import { Tabs, type Tab } from '@/components/ui/tabs';
+import { FilterSheet } from '@/components/layout/filter-sheet';
 import type { DataTableColumn } from '@/components/ui/data-table';
 import type { DemoTestCase, DemoStory } from '@qod/shared';
 import { TestHistoryDrawer } from '@/components/test-history-drawer';
@@ -425,8 +426,8 @@ export default function CoveragePage() {
             <h2 className="text-sm font-semibold text-primary">Test Cases</h2>
           </div>
 
-          {/* Filters */}
-          <div className="flex items-center gap-2 border-b border-qod-border px-4 py-2">
+          {/* Filters — desktop inline row */}
+          <div className="hidden md:flex items-center gap-2 border-b border-qod-border px-4 py-2">
             <SearchInput
               value={search}
               onChange={setSearch}
@@ -463,6 +464,63 @@ export default function CoveragePage() {
             />
           </div>
 
+          {/* Filters — mobile sheet */}
+          <div className="md:hidden flex items-center gap-2 border-b border-qod-border px-4 py-2">
+            <SearchInput
+              value={search}
+              onChange={setSearch}
+              placeholder="Search test cases..."
+              className="min-w-0 flex-1"
+            />
+            <FilterSheet
+              activeCount={
+                (suiteFilter ? 1 : 0) +
+                (testRailTypeFilter ? 1 : 0) +
+                (referencesFilter ? 1 : 0) +
+                (referenceSearch ? 1 : 0)
+              }
+              onReset={() => {
+                setSuiteFilter('');
+                setTestRailTypeFilter('');
+                setReferencesFilter('');
+                setReferenceSearch('');
+                setPage(1);
+              }}
+            >
+              <Select
+                value={suiteFilter}
+                onChange={(v) => { setSuiteFilter(v); setPage(1); }}
+                options={suiteOptions}
+                aria-label="Suite"
+                className="w-full"
+              />
+              <Select
+                value={testRailTypeFilter}
+                onChange={(v) => { setTestRailTypeFilter(v); setPage(1); }}
+                options={testRailTypeOptions}
+                aria-label="TestRail type"
+                className="w-full"
+              />
+              <Select
+                value={referencesFilter}
+                onChange={(v) => { setReferencesFilter(v); setPage(1); }}
+                options={[
+                  { value: '', label: 'All Refs' },
+                  { value: 'true', label: 'Has Ref' },
+                  { value: 'false', label: 'No Ref' },
+                ]}
+                aria-label="References"
+                className="w-full"
+              />
+              <SearchInput
+                value={referenceSearch}
+                onChange={(v) => { setReferenceSearch(v); setPage(1); }}
+                placeholder="Ref (PS-3023)..."
+                className="w-full"
+              />
+            </FilterSheet>
+          </div>
+
           {casesLoading ? (
             <div className="flex h-40 items-center justify-center">
               <Loader2 className="h-5 w-5 animate-spin text-qod-accent" />
@@ -471,12 +529,40 @@ export default function CoveragePage() {
             <DataTable
               columns={testCaseColumns as any}
               data={(testCasesData?.items ?? []) as any}
+              getRowKey={(row: any) => row.id}
               pagination={testCasesData ? {
                 page: testCasesData.page,
                 pageSize: testCasesData.pageSize,
                 total: testCasesData.total,
                 onPageChange: setPage,
               } : undefined}
+              mobileCard={(row: any) => (
+                <button
+                  type="button"
+                  className="block w-full px-4 py-3 text-left"
+                  onClick={() => { setDrawerTestId(row.id); setDrawerTestTitle(row.title); }}
+                >
+                  <div className="flex items-start gap-2">
+                    <span className="min-w-0 flex-1 text-sm font-medium text-qod-accent">
+                      {row.title}
+                    </span>
+                    <Badge variant={automationBadgeVariant(row.automationStatus)}>
+                      {row.automationStatus.replace(/_/g, ' ')}
+                    </Badge>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+                    {row.externalId && <span className="font-mono">C{row.externalId}</span>}
+                    {row.suiteName && <span>{row.suiteName}</span>}
+                    {row.testRailType && <span>{row.testRailType}</span>}
+                    <span>
+                      Last run:{' '}
+                      {row.lastExecutedAt
+                        ? new Date(row.lastExecutedAt).toLocaleDateString()
+                        : 'Never'}
+                    </span>
+                  </div>
+                </button>
+              )}
             />
           )}
         </Card>
@@ -490,7 +576,8 @@ export default function CoveragePage() {
           </div>
 
           {/* Filters */}
-          <div className="flex items-center gap-2 border-b border-qod-border px-4 py-2">
+          {/* Filters — desktop inline row */}
+          <div className="hidden md:flex items-center gap-2 border-b border-qod-border px-4 py-2">
             <SearchInput
               value={storySearch}
               onChange={(v) => { setStorySearch(v); setStoryPage(1); }}
@@ -524,6 +611,58 @@ export default function CoveragePage() {
             />
           </div>
 
+          {/* Filters — mobile sheet */}
+          <div className="md:hidden flex items-center gap-2 border-b border-qod-border px-4 py-2">
+            <SearchInput
+              value={storySearch}
+              onChange={(v) => { setStorySearch(v); setStoryPage(1); }}
+              placeholder="Search stories..."
+              className="min-w-0 flex-1"
+            />
+            <FilterSheet
+              activeCount={
+                (storyStatusFilter ? 1 : 0) +
+                (storyComponentFilter ? 1 : 0) +
+                (storyLabelFilter ? 1 : 0)
+              }
+              onReset={() => {
+                setStoryStatusFilter('');
+                setStoryComponentFilter('');
+                setStoryLabelFilter('');
+                setStoryPage(1);
+              }}
+            >
+              <Select
+                value={storyStatusFilter}
+                onChange={(v) => { setStoryStatusFilter(v); setStoryPage(1); }}
+                options={[
+                  { value: '', label: 'All Statuses' },
+                  { value: 'OPEN', label: 'Open' },
+                  { value: 'IN_PROGRESS', label: 'In Progress' },
+                  { value: 'RESOLVED', label: 'Resolved' },
+                  { value: 'CLOSED', label: 'Closed' },
+                  { value: 'REOPENED', label: 'Reopened' },
+                ]}
+                aria-label="Status"
+                className="w-full"
+              />
+              <Select
+                value={storyComponentFilter}
+                onChange={(v) => { setStoryComponentFilter(v); setStoryPage(1); }}
+                options={storyComponentOptions}
+                aria-label="Component"
+                className="w-full"
+              />
+              <Select
+                value={storyLabelFilter}
+                onChange={(v) => { setStoryLabelFilter(v); setStoryPage(1); }}
+                options={storyLabelOptions}
+                aria-label="Label"
+                className="w-full"
+              />
+            </FilterSheet>
+          </div>
+
           {storiesLoading ? (
             <div className="flex h-40 items-center justify-center">
               <Loader2 className="h-5 w-5 animate-spin text-qod-accent" />
@@ -532,12 +671,42 @@ export default function CoveragePage() {
             <DataTable
               columns={storyColumns as any}
               data={(storiesData?.items ?? []) as any}
+              getRowKey={(row: any) => row.id}
               pagination={storiesData ? {
                 page: storiesData.page,
                 pageSize: storiesData.pageSize,
                 total: storiesData.total,
                 onPageChange: setStoryPage,
               } : undefined}
+              mobileCard={(row: any) => (
+                <div className="px-4 py-3">
+                  <div className="flex items-start gap-2">
+                    <span className="min-w-0 flex-1 text-sm font-medium text-primary">
+                      {row.url ? (
+                        <a
+                          href={row.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-qod-accent hover:underline"
+                        >
+                          {row.title}
+                        </a>
+                      ) : (
+                        row.title
+                      )}
+                    </span>
+                    <Badge variant={storyStatusBadgeVariant(row.status)}>
+                      {row.status.replace(/_/g, ' ')}
+                    </Badge>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+                    <span className="font-mono">{row.externalId}</span>
+                    {row.storyPoints != null && <span>{row.storyPoints} pts</span>}
+                    {row.assignee && <span>{row.assignee}</span>}
+                    {row.component && <span>{row.component}</span>}
+                  </div>
+                </div>
+              )}
             />
           )}
         </Card>

@@ -116,8 +116,13 @@ jobs:
       - name: Install Playwright browsers
         run: cd packages/web && npx playwright install chromium --with-deps
 
-      - name: Run Playwright tests
+      - name: Run Playwright tests (chromium)
         run: cd packages/web && npx playwright test --project=chromium
+        env:
+          CI: true
+
+      - name: Run Playwright mobile-smoke (mobile-chromium + mobile-chromium-narrow)
+        run: cd packages/web && npx playwright test mobile-smoke --project=mobile-chromium --project=mobile-chromium-narrow
         env:
           CI: true
 

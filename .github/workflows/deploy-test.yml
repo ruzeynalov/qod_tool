@@ -1,0 +1,198 @@
+name: Deploy to Test
+
+# Manual deploy to the QOD test environment.
+#
+# This workflow has two jobs:
+#
+#   1) build-and-publish — always runs. Builds the API and Web Docker images
+#      from docker/Dockerfile.{api,web} and pushes them to GitHub Container
+#      Registry under ghcr.io/<owner>/qod-{api,web}, tagged with the deployed
+#      ref. Uses the workflow's GITHUB_TOKEN; no external secrets needed.
+#
+#   2) deploy-host — runs only if a TEST_SSH_HOST secret is configured.
+#      rsyncs the working tree to the host and rebuilds the Docker Compose
+#      stack. Health-checks TEST_URL/api/v1/health if TEST_URL is set.
+#
+# Trigger from the Actions UI or `gh workflow run deploy-test.yml -f ref=<ref>`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag, or commit to deploy'
+        required: true
+        default: 'main'
+
+concurrency:
+  group: deploy-test
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-publish:
+    name: Build and publish images to GHCR
+    runs-on: ubuntu-latest
+    outputs:
+      api-image: ${{ steps.meta-api.outputs.tags }}
+      web-image: ${{ steps.meta-web.outputs.tags }}
+
+    steps:
+      - name: Check out ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          # Lower-case repo owner is required by GHCR.
+          owner_lc="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          # Sanitize ref for use as a Docker tag (replace / with -).
+          ref_tag="$(echo '${{ inputs.ref }}' | tr '/' '-')"
+          short_sha="$(git rev-parse --short HEAD)"
+          {
+            echo "owner_lc=$owner_lc"
+            echo "ref_tag=$ref_tag"
+            echo "short_sha=$short_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: API image metadata
+        id: meta-api
+        run: |
+          echo "tags=ghcr.io/${{ steps.tags.outputs.owner_lc }}/qod-api:test-${{ steps.tags.outputs.ref_tag }},ghcr.io/${{ steps.tags.outputs.owner_lc }}/qod-api:test-${{ steps.tags.outputs.short_sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Web image metadata
+        id: meta-web
+        run: |
+          echo "tags=ghcr.io/${{ steps.tags.outputs.owner_lc }}/qod-web:test-${{ steps.tags.outputs.ref_tag }},ghcr.io/${{ steps.tags.outputs.owner_lc }}/qod-web:test-${{ steps.tags.outputs.short_sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.api
+          push: true
+          tags: ${{ steps.meta-api.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.web
+          push: true
+          tags: ${{ steps.meta-web.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo '## Test images published to GHCR'
+            echo
+            echo '**API:** `${{ steps.meta-api.outputs.tags }}`'
+            echo
+            echo '**Web:** `${{ steps.meta-web.outputs.tags }}`'
+            echo
+            echo 'Pull anywhere with `docker pull <tag>`.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Optional SSH-based deploy. Only runs when a TEST_SSH_HOST secret is set,
+  # so the workflow stays useful out-of-the-box without external infra.
+  deploy-host:
+    name: Deploy to test host (SSH)
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    if: ${{ vars.TEST_DEPLOY_OVER_SSH == 'true' }}
+    environment:
+      name: test
+      url: ${{ vars.TEST_URL }}
+
+    steps:
+      - name: Check out ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.TEST_SSH_KEY }}
+          SSH_HOST: ${{ secrets.TEST_SSH_HOST }}
+          SSH_PORT: ${{ secrets.TEST_SSH_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync repo to test host
+        env:
+          SSH_HOST: ${{ secrets.TEST_SSH_HOST }}
+          SSH_USER: ${{ secrets.TEST_SSH_USER }}
+          SSH_PORT: ${{ secrets.TEST_SSH_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.TEST_DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          rsync -az --delete \
+            --exclude='.git/' \
+            --exclude='node_modules/' \
+            --exclude='packages/*/node_modules/' \
+            --exclude='packages/*/dist/' \
+            --exclude='packages/*/.next/' \
+            --exclude='**/coverage/' \
+            -e "ssh -i ~/.ssh/deploy_key -p $SSH_PORT" \
+            ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+
+      - name: Rebuild and restart Docker Compose stack
+        env:
+          SSH_HOST: ${{ secrets.TEST_SSH_HOST }}
+          SSH_USER: ${{ secrets.TEST_SSH_USER }}
+          SSH_PORT: ${{ secrets.TEST_SSH_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.TEST_DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "cd '$DEPLOY_PATH/deploy/docker-compose' \
+             && docker compose pull --ignore-pull-failures \
+             && docker compose up --build -d \
+             && docker compose ps"
+
+      - name: Wait for /api/v1/health
+        env:
+          TEST_URL: ${{ vars.TEST_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_URL:-}" ]; then
+            echo "TEST_URL variable not configured; skipping health check."
+            exit 0
+          fi
+          for attempt in $(seq 1 30); do
+            if curl -fsSL --max-time 5 "$TEST_URL/api/v1/health" >/dev/null; then
+              echo "Test environment healthy after $attempt attempt(s): $TEST_URL"
+              exit 0
+            fi
+            echo "Attempt $attempt/30 failed; retrying in 5s..."
+            sleep 5
+          done
+          echo "Health check did not pass within 150s." >&2
+          exit 1
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useEffect } from 'react';
 import {
   LayoutDashboard,
   FolderKanban,
@@ -18,6 +19,8 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/app/_providers/auth-provider';
 import { cn } from '@/lib/utils/cn';
+import { Sheet, DialogTitle } from '@/components/ui/dialog';
+import { ProjectSwitcher } from './project-switcher';
 
 interface NavItem {
   label: string;
@@ -47,104 +50,126 @@ interface SidebarProps {
   onToggle: () => void;
 }
 
-export function Sidebar({ collapsed, onToggle }: SidebarProps) {
-  const { isAdmin } = useAuth();
-  const pathname = usePathname() ?? '';
+interface NavSectionsProps {
+  showLabels: boolean;
+  pathname: string;
+  isAdmin: boolean;
+  onNavigate?: () => void;
+}
 
-  // Detect if we're inside a project route
+function NavSections({ showLabels, pathname, isAdmin, onNavigate }: NavSectionsProps) {
   const projectMatch = pathname.match(/^\/projects\/([^/]+)/);
   const projectId = projectMatch?.[1];
 
   return (
-    <aside
-      className={cn(
-        'fixed left-0 top-0 z-40 flex h-screen flex-col border-r border-qod-border bg-qod-sidebar transition-all duration-200',
-        collapsed ? 'w-16' : 'w-60'
-      )}
-    >
-      {/* Brand */}
-      <div className="flex h-14 items-center gap-3 border-b border-qod-border px-4">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-qod-accent">
-          <Shield className="h-4 w-4 text-white" />
-        </div>
-        {!collapsed && (
-          <span className="text-base font-semibold tracking-tight text-primary">
-            QOD
+    <nav aria-label="Main navigation" className="flex-1 space-y-1 overflow-y-auto px-2 py-3">
+      <div className="mb-2">
+        {showLabels && (
+          <span className="px-3 text-[10px] font-semibold uppercase tracking-widest text-muted">
+            Navigation
           </span>
         )}
       </div>
-
-      {/* Main Nav */}
-      <nav aria-label="Main navigation" className="flex-1 space-y-1 overflow-y-auto px-2 py-3">
-        <div className="mb-2">
-          {!collapsed && (
-            <span className="px-3 text-[10px] font-semibold uppercase tracking-widest text-muted">
-              Navigation
-            </span>
-          )}
-        </div>
-        {mainNav.filter(item => !item.adminOnly || isAdmin).map((item) => {
+      {mainNav
+        .filter((item) => !item.adminOnly || isAdmin)
+        .map((item) => {
           const isActive =
-            item.href === '/'
-              ? pathname === '/'
-              : pathname.startsWith(item.href);
+            item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
           return (
             <Link
               key={item.href}
               href={item.href}
               aria-current={isActive ? 'page' : undefined}
+              onClick={onNavigate}
               className={cn(
                 'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
                 isActive
                   ? 'bg-qod-accent/10 text-qod-accent'
-                  : 'text-secondary hover:bg-qod-bg hover:text-primary'
+                  : 'text-secondary hover:bg-qod-bg hover:text-primary',
               )}
-              title={collapsed ? item.label : undefined}
+              title={!showLabels ? item.label : undefined}
             >
               <item.icon className="h-4 w-4 shrink-0" />
-              {!collapsed && <span>{item.label}</span>}
+              {showLabels && <span>{item.label}</span>}
             </Link>
           );
         })}
 
-        {/* Project Sub-navigation */}
-        {projectId && (
-          <>
-            <div className="mt-6 mb-2">
-              {!collapsed && (
-                <span className="px-3 text-[10px] font-semibold uppercase tracking-widest text-muted">
-                  Project
-                </span>
-              )}
-            </div>
-            {projectSubNav.map((item) => {
-              const fullHref = `/projects/${projectId}${item.href}`;
-              const isActive = item.href === ''
+      {projectId && (
+        <>
+          <div className="mt-6 mb-2">
+            {showLabels && (
+              <span className="px-3 text-[10px] font-semibold uppercase tracking-widest text-muted">
+                Project
+              </span>
+            )}
+          </div>
+          {projectSubNav.map((item) => {
+            const fullHref = `/projects/${projectId}${item.href}`;
+            const isActive =
+              item.href === ''
                 ? pathname === `/projects/${projectId}`
                 : pathname.startsWith(fullHref);
-              return (
-                <Link
-                  key={item.href}
-                  href={fullHref}
-                  aria-current={isActive ? 'page' : undefined}
-                  className={cn(
-                    'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                    isActive
-                      ? 'bg-qod-accent/10 text-qod-accent'
-                      : 'text-secondary hover:bg-qod-bg hover:text-primary'
-                  )}
-                  title={collapsed ? item.label : undefined}
-                >
-                  <item.icon className="h-4 w-4 shrink-0" />
-                  {!collapsed && <span>{item.label}</span>}
-                </Link>
-              );
-            })}
-          </>
-        )}
-      </nav>
+            return (
+              <Link
+                key={item.href}
+                href={fullHref}
+                aria-current={isActive ? 'page' : undefined}
+                onClick={onNavigate}
+                className={cn(
+                  'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                  isActive
+                    ? 'bg-qod-accent/10 text-qod-accent'
+                    : 'text-secondary hover:bg-qod-bg hover:text-primary',
+                )}
+                title={!showLabels ? item.label : undefined}
+              >
+                <item.icon className="h-4 w-4 shrink-0" />
+                {showLabels && <span>{item.label}</span>}
+              </Link>
+            );
+          })}
+        </>
+      )}
+    </nav>
+  );
+}
 
-      {/* Collapse Toggle */}
+function Brand({ showLabels }: { showLabels: boolean }) {
+  return (
+    <div className="flex h-14 items-center gap-3 border-b border-qod-border px-4">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-qod-accent">
+        <Shield className="h-4 w-4 text-white" />
+      </div>
+      {showLabels && (
+        <span className="text-base font-semibold tracking-tight text-primary">
+          QOD
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Persistent desktop rail. Hidden on <lg; the mobile equivalent is rendered
+ * on demand by `MobileNav` which sits on top of the shared `Sheet` primitive
+ * (focus trap + scroll lock + inert background + focus restoration).
+ */
+export function Sidebar({ collapsed, onToggle }: SidebarProps) {
+  const { isAdmin } = useAuth();
+  const pathname = usePathname() ?? '';
+  const showLabels = !collapsed;
+
+  return (
+    <aside
+      aria-label="Primary navigation"
+      className={cn(
+        'fixed left-0 top-0 z-40 hidden h-screen flex-col border-r border-qod-border bg-qod-sidebar transition-[width] duration-200 lg:flex',
+        collapsed ? 'lg:w-16' : 'lg:w-60',
+      )}
+    >
+      <Brand showLabels={showLabels} />
+      <NavSections showLabels={showLabels} pathname={pathname} isAdmin={isAdmin} />
       <div className="border-t border-qod-border p-2">
         <button
           onClick={onToggle}
@@ -152,13 +177,53 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
-          {collapsed ? (
-            <ChevronRight className="h-4 w-4" />
-          ) : (
-            <ChevronLeft className="h-4 w-4" />
-          )}
+          {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
         </button>
       </div>
     </aside>
+  );
+}
+
+interface MobileNavProps {
+  open: boolean;
+  onClose: () => void;
+}
+
+/**
+ * Off-canvas drawer for <lg. Built on the shared `Sheet` so it gets focus
+ * trap, scroll lock, inert background, focus restoration, Esc-to-close, and
+ * backdrop-tap-to-close for free.
+ */
+export function MobileNav({ open, onClose }: MobileNavProps) {
+  const { isAdmin } = useAuth();
+  const pathname = usePathname() ?? '';
+
+  // Auto-close when the route changes — the user just navigated, the drawer's
+  // job is done.
+  useEffect(() => {
+    if (open) onClose();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
+  return (
+    <Sheet open={open} onClose={onClose} side="left" className="bg-qod-sidebar p-0">
+      <Brand showLabels />
+      {/* Visually-hidden title satisfies the Dialog primitive's a11y contract
+          without adding a redundant heading next to the brand. */}
+      <DialogTitle className="sr-only">Site navigation</DialogTitle>
+      <NavSections
+        showLabels
+        pathname={pathname}
+        isAdmin={isAdmin}
+        onNavigate={onClose}
+      />
+      {/* Project switcher — only renders when the current path is under /projects/[id]/...
+          Uses the native <select> variant since the drawer is portal-mounted via Sheet
+          and only present in the DOM while open, so option text doesn't pollute the
+          static page DOM (which would break Playwright text queries). */}
+      <div className="border-t border-qod-border px-3 py-3">
+        <ProjectSwitcher variant="select" className="w-full" />
+      </div>
+    </Sheet>
   );
 }

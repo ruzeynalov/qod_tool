@@ -58,6 +58,8 @@ import type { DataTableColumn } from '@/components/ui/data-table';
 import type { DemoTestRun, DemoPipelineRun } from '@qod/shared';
 import type { FlakyTest, DailyPassRate } from '@/lib/demo/demo-data-provider';
 import { TestHistoryDrawer } from '@/components/test-history-drawer';
+import { ChartFrame } from '@/components/charts/chart-frame';
+import { FilterSheet } from '@/components/layout/filter-sheet';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/format';
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -145,7 +147,7 @@ function PassRateSection({ projectId }: { projectId: string }) {
         <h3 className="text-sm font-semibold text-primary">Pass Rate Trend</h3>
         <PeriodSelector value={period} onChange={setPeriod} />
       </div>
-      <div className="h-64">
+      <ChartFrame size="md">
         {isLoading ? (
           <div className="flex h-full items-center justify-center">
             <Spinner />
@@ -153,7 +155,7 @@ function PassRateSection({ projectId }: { projectId: string }) {
         ) : (
           <PassRateTrend data={chartData} />
         )}
-      </div>
+      </ChartFrame>
     </Card>
   );
 }
@@ -180,7 +182,7 @@ function ExecutionTimelineSection({ projectId }: { projectId: string }) {
         <h3 className="text-sm font-semibold text-primary">Execution Timeline</h3>
         <PeriodSelector value={period} onChange={setPeriod} />
       </div>
-      <div className="h-64">
+      <ChartFrame size="md">
         {isLoading ? (
           <div className="flex h-full items-center justify-center">
             <Spinner />
@@ -188,7 +190,7 @@ function ExecutionTimelineSection({ projectId }: { projectId: string }) {
         ) : (
           <ExecutionTimeline data={chartData} />
         )}
-      </div>
+      </ChartFrame>
     </Card>
   );
 }
@@ -301,9 +303,9 @@ function FlakyTestsSection({ projectId }: { projectId: string }) {
         <div className="px-2 pb-2">
           <h3 className="text-sm font-semibold text-primary">Flaky Tests</h3>
         </div>
-        <div className="h-72">
+        <ChartFrame size="lg">
           <FlakyTestsChart data={chartData} />
-        </div>
+        </ChartFrame>
       </Card>
 
       <Card padding="sm">
@@ -315,7 +317,32 @@ function FlakyTestsSection({ projectId }: { projectId: string }) {
         <DataTable
           columns={flakyColumns as any}
           data={flakyTests as any}
+          getRowKey={(row: any) => row.testCaseId}
           defaultSort={{ key: 'lastFlakyAt', direction: 'desc' }}
+          mobileCard={(row: any) => (
+            <button
+              type="button"
+              className="block w-full px-4 py-3 text-left"
+              onClick={() => {
+                setDrawerTestId(row.testCaseId);
+                setDrawerTestTitle(row.testTitle);
+              }}
+            >
+              <div className="flex items-start gap-2">
+                <span className="min-w-0 flex-1 truncate text-sm font-medium text-qod-accent">
+                  {row.testTitle}
+                </span>
+                <Badge variant={flakyBadgeVariant(row.flakyRate)}>
+                  {row.flakyRate.toFixed(1)}%
+                </Badge>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+                <span>{row.totalExecutions} runs</span>
+                <span>{row.flakyCount} flaky</span>
+                <span>last {formatRelativeTime(row.lastFlakyAt)}</span>
+              </div>
+            </button>
+          )}
         />
       </Card>
 
@@ -484,7 +511,7 @@ function RunHistorySection({ projectId }: { projectId: string }) {
     <Card padding="sm">
       <div className="flex flex-wrap items-center gap-3 px-2 pb-3">
         <h3 className="text-sm font-semibold text-primary">Run History</h3>
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+        <div className="ml-auto hidden md:flex flex-wrap items-center gap-2">
           <Select
             options={STATUS_OPTIONS}
             value={statusFilter}
@@ -504,6 +531,40 @@ function RunHistorySection({ projectId }: { projectId: string }) {
             className="w-36"
           />
         </div>
+        <div className="ml-auto md:hidden">
+          <FilterSheet
+            activeCount={
+              (statusFilter ? 1 : 0) + (branchFilter ? 1 : 0) + (triggerFilter ? 1 : 0)
+            }
+            onReset={() => {
+              handleStatusChange('');
+              handleBranchChange('');
+              handleTriggerChange('');
+            }}
+          >
+            <Select
+              options={STATUS_OPTIONS}
+              value={statusFilter}
+              onChange={handleStatusChange}
+              aria-label="Status"
+              className="w-full"
+            />
+            <Select
+              options={branchOptions}
+              value={branchFilter}
+              onChange={handleBranchChange}
+              aria-label="Branch"
+              className="w-full"
+            />
+            <Select
+              options={TRIGGER_OPTIONS}
+              value={triggerFilter}
+              onChange={handleTriggerChange}
+              aria-label="Trigger"
+              className="w-full"
+            />
+          </FilterSheet>
+        </div>
       </div>
 
       {isLoading ? (
@@ -514,6 +575,7 @@ function RunHistorySection({ projectId }: { projectId: string }) {
         <DataTable
           columns={columns as any}
           data={paginatedItems as any}
+          getRowKey={(row: any) => row.id}
           onRowClick={() => {
             // Future drill-down
           }}
@@ -524,6 +586,35 @@ function RunHistorySection({ projectId }: { projectId: string }) {
             total: filteredData.total,
             onPageChange: setPage,
           }}
+          mobileCard={(row: any) => (
+            <div className="px-4 py-3">
+              <div className="flex items-start gap-2">
+                <span className="min-w-0 flex-1 truncate text-sm font-medium text-primary">
+                  {row.name}
+                </span>
+                {row.isRerun && <Badge variant="warning">Re-run</Badge>}
+                <Badge variant={row.status === 'PASSED' ? 'success' : 'error'}>
+                  {row.status}
+                </Badge>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+                <span className="inline-flex items-center gap-1">
+                  <GitBranch className="h-3 w-3" />
+                  {row.branch}
+                </span>
+                <span>{TRIGGER_LABELS[row.triggerType] ?? row.triggerType}</span>
+                <span>{formatDuration(row.durationMs)}</span>
+                <span>{formatRelativeTime(row.startedAt)}</span>
+              </div>
+              <div className="mt-1 text-xs">
+                <span className="text-rag-green">{row.passedCount}P</span>
+                <span className="text-muted"> · </span>
+                <span className="text-rag-red">{row.failedCount}F</span>
+                <span className="text-muted"> · </span>
+                <span className="text-secondary">{row.skippedCount}S</span>
+              </div>
+            </div>
+          )}
         />
       )}
     </Card>
@@ -629,7 +720,31 @@ function PipelineRunsSection({ projectId }: { projectId: string }) {
             <DataTable
               columns={columns as any}
               data={(pipelineRuns ?? []) as any}
+              getRowKey={(row: any) => row.id}
               emptyMessage="No pipeline runs available."
+              mobileCard={(row: any) => (
+                <div className="px-4 py-3">
+                  <div className="flex items-start gap-2">
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium text-primary">
+                      {row.workflowName}
+                    </span>
+                    <Badge variant={row.status === 'SUCCESS' ? 'success' : 'error'}>
+                      {row.status}
+                    </Badge>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+                    <span className="inline-flex items-center gap-1">
+                      <GitBranch className="h-3 w-3" />
+                      {row.branch}
+                    </span>
+                    <code className="rounded bg-qod-bg px-1 font-mono text-[11px]">
+                      {row.sha.slice(0, 7)}
+                    </code>
+                    <span>{formatDuration(row.durationMs)}</span>
+                    <span>{formatRelativeTime(row.startedAt)}</span>
+                  </div>
+                </div>
+              )}
             />
           )}
         </div>
@@ -696,7 +811,7 @@ function RerunAnalysisSection({ projectId }: { projectId: string }) {
       </h3>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {hasReruns ? (
           <>
             <StatCard
@@ -784,7 +899,7 @@ function RerunAnalysisSection({ projectId }: { projectId: string }) {
             {hasReruns ? 'Runs vs Re-runs by Day' : 'Daily Run Results'}
           </h4>
         </div>
-        <div className="h-64">
+        <ChartFrame size="md">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart
               data={chartData}
@@ -822,7 +937,7 @@ function RerunAnalysisSection({ projectId }: { projectId: string }) {
               )}
             </BarChart>
           </ResponsiveContainer>
-        </div>
+        </ChartFrame>
       </Card>
     </div>
   );

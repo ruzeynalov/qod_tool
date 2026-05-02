@@ -1,13 +1,19 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { X, Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogBody,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { useUpdateUser, useChangePassword } from '@/lib/api/hooks';
 
 const inputClass =
-  'w-full rounded-md border border-qod-border bg-qod-surface px-3 py-2 text-sm text-primary placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent';
+  'w-full rounded-md border border-qod-border bg-qod-surface px-3 py-2 text-base text-primary placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent sm:text-sm';
 
 export function UserSettingsDialog({
   open,
@@ -35,7 +41,7 @@ export function UserSettingsDialog({
     if (user) setName(user.name);
   }, [user]);
 
-  if (!open || !user) return null;
+  if (!user) return null;
 
   async function handleSaveProfile() {
     try {
@@ -59,98 +65,99 @@ export function UserSettingsDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="mx-4 w-full max-w-md rounded-lg border border-qod-border bg-qod-surface shadow-2xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-qod-border px-4 py-3">
-          <h3 className="text-sm font-semibold text-primary">Account Settings</h3>
-          <button onClick={onClose} className="rounded p-1 text-muted hover:text-primary hover:bg-qod-bg">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="px-4 py-4 space-y-6">
-          {/* Profile Section */}
-          <div className="space-y-3">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted">Profile</h4>
-            <div>
-              <label className="block text-xs font-medium text-secondary mb-1.5">Name</label>
-              <input type="text" value={name} onChange={(e) => setName(e.target.value)} className={inputClass} />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-secondary mb-1.5">Email</label>
-              <input type="text" value={user.email} disabled className={cn(inputClass, 'opacity-50 cursor-not-allowed')} />
-            </div>
-            {updateUser.isError && (
-              <p className="text-xs text-rag-red">{(updateUser.error as Error)?.message || 'Failed to update profile.'}</p>
-            )}
-            <div className="flex items-center gap-2">
-              <Button onClick={handleSaveProfile} disabled={!name || name === user.name || updateUser.isPending}>
-                {updateUser.isPending ? 'Saving...' : 'Save Profile'}
-              </Button>
-              {profileSuccess && <span className="text-xs text-rag-green">Saved!</span>}
-            </div>
+    <Dialog open={open} onClose={onClose}>
+      <DialogHeader onClose={onClose}>
+        <DialogTitle>Account Settings</DialogTitle>
+      </DialogHeader>
+      <DialogBody className="space-y-6">
+        {/* Profile Section */}
+        <div className="space-y-3">
+          <h4 className="text-xs font-semibold uppercase tracking-wider text-muted">Profile</h4>
+          <div>
+            <label className="block text-xs font-medium text-secondary mb-1.5">Name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className={inputClass}
+              data-autofocus
+            />
           </div>
+          <div>
+            <label className="block text-xs font-medium text-secondary mb-1.5">Email</label>
+            <input type="text" value={user.email} disabled className={cn(inputClass, 'opacity-50 cursor-not-allowed')} />
+          </div>
+          {updateUser.isError && (
+            <p className="text-xs text-rag-red">{(updateUser.error as Error)?.message || 'Failed to update profile.'}</p>
+          )}
+          <div className="flex items-center gap-2">
+            <Button onClick={handleSaveProfile} disabled={!name || name === user.name || updateUser.isPending}>
+              {updateUser.isPending ? 'Saving...' : 'Save Profile'}
+            </Button>
+            {profileSuccess && <span className="text-xs text-rag-green">Saved!</span>}
+          </div>
+        </div>
 
-          {/* Password Section */}
-          <div className="space-y-3 border-t border-qod-border pt-4">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted">Change Password</h4>
-            <div>
-              <label className="block text-xs font-medium text-secondary mb-1.5">Current Password</label>
-              <div className="relative">
-                <input
-                  type={showCurrentPw ? 'text' : 'password'}
-                  value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
-                  placeholder="Enter current password"
-                  className={inputClass}
-                />
-                <button type="button" onClick={() => setShowCurrentPw(!showCurrentPw)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-primary">
-                  {showCurrentPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                </button>
-              </div>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-secondary mb-1.5">New Password</label>
-              <div className="relative">
-                <input
-                  type={showNewPw ? 'text' : 'password'}
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="Enter new password (min 8 characters)"
-                  className={inputClass}
-                />
-                <button type="button" onClick={() => setShowNewPw(!showNewPw)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-primary">
-                  {showNewPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                </button>
-              </div>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-secondary mb-1.5">Confirm New Password</label>
+        {/* Password Section */}
+        <div className="space-y-3 border-t border-qod-border pt-4">
+          <h4 className="text-xs font-semibold uppercase tracking-wider text-muted">Change Password</h4>
+          <div>
+            <label className="block text-xs font-medium text-secondary mb-1.5">Current Password</label>
+            <div className="relative">
               <input
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="Confirm new password"
+                type={showCurrentPw ? 'text' : 'password'}
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                placeholder="Enter current password"
                 className={inputClass}
               />
-              {confirmPassword && newPassword !== confirmPassword && (
-                <p className="mt-1 text-xs text-rag-red">Passwords do not match</p>
-              )}
-            </div>
-            {changePassword.isError && (
-              <p className="text-xs text-rag-red">{(changePassword.error as Error)?.message || 'Failed to change password.'}</p>
-            )}
-            <div className="flex items-center gap-2">
-              <Button
-                onClick={handleChangePassword}
-                disabled={!currentPassword || !newPassword || newPassword.length < 8 || newPassword !== confirmPassword || changePassword.isPending}
-              >
-                {changePassword.isPending ? 'Changing...' : 'Change Password'}
-              </Button>
-              {passwordSuccess && <span className="text-xs text-rag-green">Password changed!</span>}
+              <button type="button" onClick={() => setShowCurrentPw(!showCurrentPw)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-primary">
+                {showCurrentPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+              </button>
             </div>
           </div>
+          <div>
+            <label className="block text-xs font-medium text-secondary mb-1.5">New Password</label>
+            <div className="relative">
+              <input
+                type={showNewPw ? 'text' : 'password'}
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="Enter new password (min 8 characters)"
+                className={inputClass}
+              />
+              <button type="button" onClick={() => setShowNewPw(!showNewPw)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-primary">
+                {showNewPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+              </button>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-secondary mb-1.5">Confirm New Password</label>
+            <input
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder="Confirm new password"
+              className={inputClass}
+            />
+            {confirmPassword && newPassword !== confirmPassword && (
+              <p className="mt-1 text-xs text-rag-red">Passwords do not match</p>
+            )}
+          </div>
+          {changePassword.isError && (
+            <p className="text-xs text-rag-red">{(changePassword.error as Error)?.message || 'Failed to change password.'}</p>
+          )}
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={handleChangePassword}
+              disabled={!currentPassword || !newPassword || newPassword.length < 8 || newPassword !== confirmPassword || changePassword.isPending}
+            >
+              {changePassword.isPending ? 'Changing...' : 'Change Password'}
+            </Button>
+            {passwordSuccess && <span className="text-xs text-rag-green">Password changed!</span>}
+          </div>
         </div>
-      </div>
-    </div>
+      </DialogBody>
+    </Dialog>
   );
 }
