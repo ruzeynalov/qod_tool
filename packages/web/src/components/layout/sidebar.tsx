@@ -20,6 +20,7 @@ import {
 import { useAuth } from '@/app/_providers/auth-provider';
 import { cn } from '@/lib/utils/cn';
 import { Sheet, DialogTitle } from '@/components/ui/dialog';
+import { ProjectSwitcher } from './project-switcher';
 
 interface NavItem {
   label: string;
@@ -216,6 +217,10 @@ export function MobileNav({ open, onClose }: MobileNavProps) {
         isAdmin={isAdmin}
         onNavigate={onClose}
       />
+      {/* Project switcher — only renders when the current path is under /projects/[id]/... */}
+      <div className="border-t border-qod-border px-3 py-3">
+        <ProjectSwitcher className="w-full" />
+      </div>
     </Sheet>
   );
 }

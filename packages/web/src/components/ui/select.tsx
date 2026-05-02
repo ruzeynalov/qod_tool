@@ -36,7 +36,8 @@ export function Select({
         disabled={disabled}
         aria-label={ariaLabel ?? placeholder}
         className={cn(
-          'w-full appearance-none rounded-md border border-qod-border bg-qod-surface py-2 pl-3 pr-8 text-sm text-primary',
+          // text-base on <sm prevents iOS Safari zoom-on-focus
+          'w-full appearance-none rounded-md border border-qod-border bg-qod-surface py-2 pl-3 pr-8 text-base text-primary sm:text-sm',
           'focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent',
           'transition-colors',
           disabled && 'opacity-50 cursor-not-allowed',

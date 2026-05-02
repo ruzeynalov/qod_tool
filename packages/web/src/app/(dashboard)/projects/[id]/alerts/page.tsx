@@ -64,11 +64,12 @@ function thresholdLabel(metric: string): string {
 
 // ── Shared input class ──────────────────────────────────────────────────
 
+// text-base on <sm prevents iOS Safari zoom-on-focus
 const inputClass =
-  'w-full rounded-md border border-qod-border bg-qod-surface px-3 py-2 text-sm text-primary placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent';
+  'w-full rounded-md border border-qod-border bg-qod-surface px-3 py-2 text-base text-primary placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent sm:text-sm';
 
 const selectClass =
-  'w-full rounded-md border border-qod-border bg-qod-surface px-3 py-2 text-sm text-primary focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent';
+  'w-full rounded-md border border-qod-border bg-qod-surface px-3 py-2 text-base text-primary focus:outline-none focus:ring-1 focus:ring-qod-accent focus:border-qod-accent sm:text-sm';
 
 // ── Form state type ─────────────────────────────────────────────────────
 

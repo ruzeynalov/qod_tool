@@ -69,7 +69,8 @@ export function NotificationBell() {
       <button
         onClick={() => setOpen(!open)}
         className={cn(
-          'flex h-8 w-8 items-center justify-center rounded-md text-secondary transition-colors hover:bg-qod-bg hover:text-primary',
+          // 44x44 tap target on <sm; 32x32 on >=sm to match the rest of the header
+          'flex h-10 w-10 items-center justify-center rounded-md text-secondary transition-colors hover:bg-qod-bg hover:text-primary sm:h-8 sm:w-8',
           open && 'bg-qod-bg text-primary',
         )}
         title="Notifications"

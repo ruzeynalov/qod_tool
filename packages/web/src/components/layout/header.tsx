@@ -3,7 +3,9 @@
 import { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Sun, Moon, ChevronRight, User, Paintbrush, Check, LogOut, Settings, Menu } from 'lucide-react';
+import { Sun, Moon, ChevronRight, User, Paintbrush, Check, LogOut, Settings, Menu, MoreHorizontal } from 'lucide-react';
+import { Sheet, DialogHeader, DialogTitle, DialogBody } from '@/components/ui/dialog';
+import { ProjectSwitcher } from './project-switcher';
 import { useRouter } from 'next/navigation';
 import { useTheme, type Skin } from '@/app/_providers/theme-provider';
 import { useDemoMode } from '@/app/_providers/demo-mode-provider';
@@ -63,6 +65,7 @@ export function Header({ onMenuClick }: HeaderProps = {}) {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showSkinMenu, setShowSkinMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showOverflow, setShowOverflow] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const skinRef = useRef<HTMLDivElement>(null);
 
@@ -93,6 +96,11 @@ export function Header({ onMenuClick }: HeaderProps = {}) {
             <Menu className="h-5 w-5" />
           </button>
         )}
+
+        {/* Project switcher — desktop only, only renders on /projects/[id]/* routes */}
+        <div className="hidden lg:block">
+          <ProjectSwitcher className="w-44" />
+        </div>
 
         {/* Breadcrumbs — collapse intermediate crumbs to current page on <sm */}
         <nav className="flex min-w-0 items-center gap-1 overflow-hidden text-sm">
@@ -127,10 +135,10 @@ export function Header({ onMenuClick }: HeaderProps = {}) {
 
       {/* Right section */}
       <div className="flex shrink-0 items-center gap-2 sm:gap-3">
-        {/* Demo Mode toggle */}
+        {/* Demo Mode toggle — desktop only; mobile gets it in the overflow Sheet */}
         <button
           onClick={toggleDemoMode}
-          className="flex items-center gap-2 rounded-full border border-qod-border px-3 py-1 text-xs font-medium transition-colors hover:bg-qod-bg"
+          className="hidden sm:flex items-center gap-2 rounded-full border border-qod-border px-3 py-1 text-xs font-medium transition-colors hover:bg-qod-bg"
           title={demoMode ? 'Switch to live data' : 'Switch to demo data'}
         >
           <span className={demoMode ? 'text-rag-amber' : 'text-muted'}>Demo</span>
@@ -139,11 +147,21 @@ export function Header({ onMenuClick }: HeaderProps = {}) {
           </div>
         </button>
 
-        {/* Notification bell */}
+        {/* Notification bell — always visible */}
         <NotificationBell />
 
-        {/* Skin switcher */}
-        <div className="relative" ref={skinRef}>
+        {/* Mobile overflow button — Demo + Skin + Theme live inside on <sm */}
+        <button
+          type="button"
+          onClick={() => setShowOverflow(true)}
+          aria-label="Display & data settings"
+          className="sm:hidden flex h-10 w-10 items-center justify-center rounded-md text-secondary transition-colors hover:bg-qod-bg hover:text-primary"
+        >
+          <MoreHorizontal className="h-5 w-5" />
+        </button>
+
+        {/* Skin switcher — desktop only; mobile gets it in the overflow Sheet */}
+        <div className="relative hidden sm:block" ref={skinRef}>
           <button
             onClick={() => setShowSkinMenu(!showSkinMenu)}
             className={cn(
@@ -180,10 +198,10 @@ export function Header({ onMenuClick }: HeaderProps = {}) {
           )}
         </div>
 
-        {/* Theme toggle */}
+        {/* Theme toggle — desktop only; mobile gets it in the overflow Sheet */}
         <button
           onClick={toggleTheme}
-          className="flex h-8 w-8 items-center justify-center rounded-md text-secondary transition-colors hover:bg-qod-bg hover:text-primary"
+          className="hidden sm:flex h-8 w-8 items-center justify-center rounded-md text-secondary transition-colors hover:bg-qod-bg hover:text-primary"
           title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
         >
           {theme === 'dark' ? (
@@ -197,7 +215,7 @@ export function Header({ onMenuClick }: HeaderProps = {}) {
         <div className="relative" ref={menuRef}>
           <button
             onClick={() => setShowUserMenu(!showUserMenu)}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-qod-border text-secondary transition-colors hover:text-primary"
+            className="flex h-10 w-10 items-center justify-center rounded-full bg-qod-border text-secondary transition-colors hover:text-primary sm:h-8 sm:w-8"
           >
             <User className="h-4 w-4" />
           </button>
@@ -266,6 +284,76 @@ export function Header({ onMenuClick }: HeaderProps = {}) {
           }}
         />
       )}
+
+      {/* Mobile overflow Sheet — Demo + Skin + Theme on <sm */}
+      <Sheet
+        open={showOverflow}
+        onClose={() => setShowOverflow(false)}
+        side="bottom"
+        className="bg-qod-surface p-0"
+      >
+        <DialogHeader onClose={() => setShowOverflow(false)}>
+          <DialogTitle>Display & data</DialogTitle>
+        </DialogHeader>
+        <DialogBody className="space-y-1 px-2 py-2">
+          {/* Demo toggle row */}
+          <button
+            type="button"
+            onClick={() => { toggleDemoMode(); }}
+            className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-3 text-left text-sm text-primary hover:bg-qod-bg"
+          >
+            <span className="flex flex-col">
+              <span className="font-medium">Demo mode</span>
+              <span className="text-xs text-muted">
+                {demoMode ? 'Showing generated demo data' : 'Live data'}
+              </span>
+            </span>
+            <div className={cn('relative h-5 w-9 shrink-0 rounded-full transition-colors', demoMode ? 'bg-rag-amber' : 'bg-qod-border')}>
+              <div className={cn('absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform', demoMode ? 'translate-x-4' : 'translate-x-0.5')} />
+            </div>
+          </button>
+
+          {/* Skin section */}
+          <div className="px-3 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-widest text-muted">
+            Skin
+          </div>
+          {skinOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => { setSkin(option.value); }}
+              className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors hover:bg-qod-bg"
+            >
+              <div className="flex-1">
+                <p className={cn('text-sm font-medium', skin === option.value ? 'text-qod-accent' : 'text-primary')}>
+                  {option.label}
+                </p>
+                <p className="text-xs text-muted">{option.description}</p>
+              </div>
+              {skin === option.value && (
+                <Check className="h-4 w-4 shrink-0 text-qod-accent" />
+              )}
+            </button>
+          ))}
+
+          {/* Theme toggle row */}
+          <div className="px-3 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-widest text-muted">
+            Theme
+          </div>
+          <button
+            type="button"
+            onClick={() => { toggleTheme(); }}
+            className="flex w-full items-center gap-3 rounded-md px-3 py-3 text-left text-sm text-primary hover:bg-qod-bg"
+          >
+            {theme === 'dark' ? (
+              <Sun className="h-4 w-4 text-muted" />
+            ) : (
+              <Moon className="h-4 w-4 text-muted" />
+            )}
+            <span>Switch to {theme === 'dark' ? 'light' : 'dark'} mode</span>
+          </button>
+        </DialogBody>
+      </Sheet>
     </header>
   );
 }

@@ -1,7 +1,9 @@
 'use client';
 
-import { useState, useMemo, useEffect, useCallback } from 'react';
-import { X, Clock, ChevronDown, ChevronRight } from 'lucide-react';
+import { useState, useMemo, useCallback } from 'react';
+import { Clock, ChevronDown, ChevronRight } from 'lucide-react';
+import { Sheet, DialogHeader, DialogTitle, DialogDescription, DialogBody } from '@/components/ui/dialog';
+import { useMediaQuery } from '@/lib/utils/use-media-query';
 import {
   AreaChart,
   Area,
@@ -131,16 +133,11 @@ export function TestHistoryDrawer({
   const chartColors = useChartColors();
   const { data: history = [] } = useTestExecutionHistory(projectId, testCaseId);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
-
-  // Close on Escape key
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  // On <md the drawer becomes a bottom sheet; on >=md it slides from the
+  // right (its previous behaviour). The shared `Sheet` primitive owns
+  // backdrop / focus trap / scroll lock / Esc — no hand-rolled keyboard
+  // handling needed here.
+  const isWide = useMediaQuery('(min-width: 768px)');
 
   // ── Chart data (chronological: oldest → newest for left-to-right) ───
   const chartData = useMemo(() => {
@@ -176,46 +173,18 @@ export function TestHistoryDrawer({
   }, []);
 
   return (
-    <>
-      {/* Backdrop */}
-      <div
-        className={`fixed inset-0 z-40 bg-black/50 transition-opacity duration-300 ${
-          isOpen ? 'opacity-100' : 'pointer-events-none opacity-0'
-        }`}
-        onClick={onClose}
-        aria-hidden="true"
-      />
+    <Sheet
+      open={isOpen}
+      onClose={onClose}
+      side={isWide ? 'right' : 'bottom'}
+      className={isWide ? 'md:w-[28rem] md:max-w-[28rem] md:rounded-none md:border-l md:border-t-0' : ''}
+    >
+      <DialogHeader onClose={onClose}>
+        <DialogTitle>Execution History</DialogTitle>
+        <DialogDescription className="truncate">{testTitle}</DialogDescription>
+      </DialogHeader>
 
-      {/* Drawer panel */}
-      <div
-        className={`fixed right-0 top-0 z-50 flex h-full w-full max-w-lg flex-col bg-qod-surface shadow-2xl transition-transform duration-300 ease-in-out ${
-          isOpen ? 'translate-x-0' : 'translate-x-full'
-        }`}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Test execution history"
-      >
-        {/* Header */}
-        <div className="flex items-start justify-between border-b border-qod-border px-5 py-4">
-          <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-semibold text-primary">
-              Execution History
-            </h2>
-            <p className="mt-0.5 truncate text-xs text-secondary" title={testTitle}>
-              {testTitle}
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="ml-3 rounded p-1 text-muted transition-colors hover:bg-qod-bg hover:text-primary"
-            aria-label="Close drawer"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        {/* Scrollable content */}
-        <div className="flex-1 overflow-y-auto">
+      <DialogBody className="px-0 py-0">
           {history.length === 0 ? (
             <div className="flex h-48 items-center justify-center text-sm text-muted">
               No execution history available.
@@ -398,8 +367,7 @@ export function TestHistoryDrawer({
               </div>
             </div>
           )}
-        </div>
-      </div>
-    </>
+      </DialogBody>
+    </Sheet>
   );
 }
