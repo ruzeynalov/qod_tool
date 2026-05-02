@@ -619,7 +619,7 @@ Ordering rationale:
 
 | Phase | New files | Modified files | LOC additive |
 |---|---|---|---|
-| 2 | `chart-frame.tsx`, `use-responsive-tick-font.ts`, `filter-sheet.tsx` | `data-table.tsx`, 5 callsites, `tabs.tsx`, `users/page.tsx`, `alerts/page.tsx`, ~5 chart files | ~480 |
+| 2 | `chart-frame.tsx`, `filter-sheet.tsx` | `data-table.tsx`, 5 callsites, `tabs.tsx`, `users/page.tsx`, `alerts/page.tsx`, ~5 chart files | ~480 |
 | 3 | `use-media-query.ts`, `project-switcher.tsx` | `header.tsx`, `test-history-drawer.tsx`, `select.tsx`, `search-input.tsx`, `users/page.tsx`, `alerts/page.tsx`, KPI formula configurator | ~210 |
 | 4 | `e2e/mobile-smoke.spec.ts`, `e2e/visual-regression.spec.ts`, `lighthouserc.json`, screenshot baselines | `playwright.config.ts`, `.github/workflows/ci.yml` | ~250 + binaries |
 
