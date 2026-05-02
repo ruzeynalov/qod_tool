@@ -60,9 +60,16 @@ export default function ProjectLayout({
         )}
       </div>
 
-      {/* Tab Navigation */}
-      <div className="-mx-6 border-b border-qod-border px-6">
-        <nav className="flex gap-0">
+      {/* Tab Navigation — bleed-to-edge negative margins MUST match the
+          dashboard layout's responsive page padding (p-3 sm:p-4 lg:p-6),
+          otherwise on <lg the bleed extends past the viewport and forces
+          horizontal page scroll. The nav itself scrolls horizontally on
+          <sm so 7 tabs (~600px total) don't widen the page. */}
+      <div className="-mx-3 sm:-mx-4 lg:-mx-6 border-b border-qod-border px-3 sm:px-4 lg:px-6">
+        <nav
+          className="flex gap-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:overflow-x-visible"
+          style={{ scrollSnapType: 'x mandatory' }}
+        >
           {tabs.map((tab) => {
             const fullHref = `${basePath}${tab.href}`;
             const isActive =
@@ -74,8 +81,9 @@ export default function ProjectLayout({
               <Link
                 key={tab.href}
                 href={fullHref}
+                style={{ scrollSnapAlign: 'start' }}
                 className={cn(
-                  'flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors',
+                  'flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors whitespace-nowrap',
                   isActive
                     ? 'border-qod-accent text-qod-accent'
                     : 'border-transparent text-secondary hover:border-qod-border hover:text-primary'
