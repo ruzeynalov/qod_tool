@@ -341,12 +341,13 @@ describe('GitHubConnector', () => {
     it('falls back to all workflows when no workflowFile is configured', async () => {
       // Without workflowFile we should still ingest workflow runs so failed/
       // setup-only builds populate test_runs.  Use the all-workflows endpoint
-      // and filter by branch (default: main).
+      // filtered by branch (default: main) AND status=completed so queued/
+      // in-progress runs do not consume slots in the maxRuns page.
       const run = mockWorkflowRun({ id: 555, run_number: 7, head_branch: 'main' });
 
       nock(GITHUB_API)
         .get('/repos/my-org/my-repo/actions/runs')
-        .query({ per_page: '10', page: '1', branch: 'main' })
+        .query({ per_page: '10', page: '1', branch: 'main', status: 'completed' })
         .reply(200, { workflow_runs: [run] });
 
       nock(GITHUB_API)

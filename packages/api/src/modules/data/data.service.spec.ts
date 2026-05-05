@@ -937,6 +937,23 @@ describe('DataService', () => {
 
       expect(result).toHaveLength(5);
     });
+
+    it('counts ERRORED and CANCELLED runs in failedRuns', async () => {
+      const runs = [
+        { startedAt: new Date('2026-03-01T10:00:00Z'), status: 'PASSED', totalTests: 10, passedCount: 10 },
+        { startedAt: new Date('2026-03-01T11:00:00Z'), status: 'CANCELLED', totalTests: 0, passedCount: 0 },
+        { startedAt: new Date('2026-03-01T12:00:00Z'), status: 'ERRORED', totalTests: 0, passedCount: 0 },
+        { startedAt: new Date('2026-03-01T13:00:00Z'), status: 'FAILED', totalTests: 10, passedCount: 5 },
+      ];
+      prisma.testRun.findMany.mockResolvedValue(runs);
+
+      const result = await service.getPassRateTrend(projectId, 30);
+      const day = result.find((r) => r.date === '2026-03-01');
+      expect(day).toBeDefined();
+      expect(day!.totalRuns).toBe(4);
+      expect(day!.passedRuns).toBe(1);
+      expect(day!.failedRuns).toBe(3);
+    });
   });
 
   // ── getCoverageData ────────────────────────────────────────
@@ -1440,6 +1457,12 @@ describe('DataService', () => {
       expect(result).toHaveLength(1);
       expect(result[0].testCaseId).toBe('tc-flaky');
       expect(result[0].totalExecutions).toBe(3);
+      // Single FLAKY hit, no PASS↔FAIL transitions: flakyCount must be 1
+      // (the previous algorithm double-counted FLAKY as both a transition
+      // and a direct hit, which inflated this to 3).
+      expect(result[0].flakyCount).toBe(1);
+      // Rate denominator is totalExecutions - 1 = 2, numerator is 1 → 50%
+      expect(result[0].flakyRate).toBe(50);
     });
 
     it('should default featureAreaId to empty string when null', async () => {
@@ -1594,6 +1617,32 @@ describe('DataService', () => {
       const result = await service.getRerunStats(projectId);
 
       expect(result.rerunRate).toBe(33.3);
+    });
+
+    it('counts ERRORED and CANCELLED runs as unsuccessful', async () => {
+      // The GitHub connector now produces CANCELLED (cancelled workflow) and
+      // ERRORED (timed_out / startup_failure) statuses. Run Health and the
+      // Daily Run Results chart treat them as failed alongside FAILED;
+      // otherwise they inflate totalRuns without contributing to
+      // failedCount, masking real CI breakage as a "passed" run.
+      const runs = [
+        { startedAt: new Date('2026-03-01T10:00:00Z'), status: 'PASSED', isRerun: false },
+        { startedAt: new Date('2026-03-01T11:00:00Z'), status: 'CANCELLED', isRerun: false },
+        { startedAt: new Date('2026-03-01T12:00:00Z'), status: 'ERRORED', isRerun: false },
+        { startedAt: new Date('2026-03-01T13:00:00Z'), status: 'FAILED', isRerun: false },
+      ];
+      prisma.testRun.findMany.mockResolvedValue(runs);
+
+      const result = await service.getRerunStats(projectId);
+
+      // 4 original runs, 3 unsuccessful → 75%
+      expect(result.totalRuns).toBe(4);
+      expect(result.originalFailRate).toBe(75);
+
+      const day = result.rerunsByDay.find((d) => d.date === '2026-03-01');
+      expect(day).toBeDefined();
+      expect(day!.passed).toBe(1);
+      expect(day!.failed).toBe(3);
     });
   });
 

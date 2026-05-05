@@ -88,10 +88,13 @@ export class GitHubConnector implements IQODConnector {
     // When workflowFile is configured, scope to that workflow + branch + completed.
     // Otherwise fall back to all workflows for the branch — failed/setup-only runs
     // still need to populate test_runs so Run Health, Daily Run Results, and Run
-    // History reflect them. (Don't use `since` — maxRuns controls the fetch window.)
+    // History reflect them. We request `status: 'completed'` from GitHub on the
+    // fallback path too: otherwise queued/in-progress runs would consume slots
+    // in the maxRuns page and we'd silently skip completed runs that fell off
+    // the first page. (Don't use `since` — maxRuns controls the fetch window.)
     const runs = creds.workflowFile
       ? await this.fetchBranchWorkflowRuns(creds, branch, maxRuns)
-      : await this.fetchRecentWorkflowRuns(creds, maxRuns, undefined, branch);
+      : await this.fetchRecentWorkflowRuns(creds, maxRuns, undefined, branch, 'completed');
     const testRuns: NormalizedTestRun[] = [];
 
     for (let i = 0; i < runs.length; i++) {
@@ -236,12 +239,13 @@ export class GitHubConnector implements IQODConnector {
 
   // ──────────────── Private: Fetch runs ────────────────
 
-  /** Fetch up to maxRuns recent workflow runs, optionally filtered by since date and branch. */
+  /** Fetch up to maxRuns recent workflow runs, optionally filtered by since date, branch, and run status. */
   private async fetchRecentWorkflowRuns(
     creds: GitHubCredentials,
     maxRuns: number,
     since?: Date,
     branch?: string,
+    status?: string,
   ): Promise<GitHubWorkflowRun[]> {
     const basePath = creds.workflowFile
       ? `/repos/${creds.owner}/${creds.repo}/actions/workflows/${creds.workflowFile}/runs`
@@ -256,6 +260,9 @@ export class GitHubConnector implements IQODConnector {
     }
     if (branch) {
       query.branch = branch;
+    }
+    if (status) {
+      query.status = status;
     }
 
     this.logger.log(`Fetching workflow runs: ${basePath} query=${JSON.stringify(query)}`);

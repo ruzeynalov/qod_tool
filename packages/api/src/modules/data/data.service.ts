@@ -2,6 +2,18 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../database/prisma.service';
 import { Prisma } from '@prisma/client';
 
+/**
+ * Run statuses that count as "unsuccessful" for Run Health and Daily Run
+ * Results. CANCELLED and ERRORED runs are not green; treating them as passed
+ * (the previous default of "everything that isn't FAILED is implicitly OK")
+ * hid CI breakages from the dashboard.
+ */
+const UNSUCCESSFUL_RUN_STATUSES = ['FAILED', 'ERRORED', 'CANCELLED'] as const;
+
+function isUnsuccessfulRun(status: string): boolean {
+  return (UNSUCCESSFUL_RUN_STATUSES as readonly string[]).includes(status);
+}
+
 @Injectable()
 export class DataService {
   constructor(private readonly prisma: PrismaService) {}
@@ -530,7 +542,7 @@ export class DataService {
       entry.passed += run.passedCount;
       entry.totalRuns++;
       if (run.status === 'PASSED') entry.passedRuns++;
-      else if (run.status === 'FAILED') entry.failedRuns++;
+      else if (isUnsuccessfulRun(run.status)) entry.failedRuns++;
       byDay.set(day, entry);
     }
 
@@ -812,10 +824,11 @@ export class DataService {
       const flakyRunsCount = runStatuses.filter((r) => r.status === 'FLAKY').length;
       const lastFlakyRun = runStatuses.find((r) => r.status === 'FLAKY');
 
-      // Count cross-run transitions. FLAKY runs are treated as a flip on
-      // either side, so a FLAKY result counts toward transitions.
+      // Count PASS↔FAIL cross-run transitions. FLAKY rows are deliberately
+      // excluded here so we don't double-count them — a FLAKY between two
+      // PASSes would otherwise show as 2 transitions plus 1 direct hit.
       const transitionRelevant = runStatuses.filter(
-        (r) => r.status === 'PASSED' || r.status === 'FAILED' || r.status === 'FLAKY',
+        (r) => r.status === 'PASSED' || r.status === 'FAILED',
       );
       let transitions = 0;
       let lastTransitionAt: Date | null = null;
@@ -829,25 +842,23 @@ export class DataService {
       }
 
       // A test is flaky if it has at least one FLAKY run, OR at least 2
-      // cross-run transitions (PASS→FAIL→PASS / FAIL→PASS→FAIL).
+      // PASS↔FAIL transitions (PASS→FAIL→PASS / FAIL→PASS→FAIL).
       const isFlaky = flakyRunsCount > 0 || transitions >= 2;
       if (!isFlaky) continue;
 
+      // Single source of truth for both count and rate numerator — pick the
+      // stronger signal between within-run flakes and cross-run transitions
+      // instead of summing them.
+      const flakyEvents = Math.max(flakyRunsCount, transitions);
       const totalExecutions = runStatuses.length;
-      const flakyCount = Math.max(flakyRunsCount, transitions);
-      // Rate denominator: prefer the transitionRelevant count (matches the
-      // cross-run case) but fall back to total executions.
-      const denom = Math.max(transitionRelevant.length - 1, 1);
-      const flakyRate = Math.min(
-        100,
-        ((flakyRunsCount + transitions) / denom) * 100,
-      );
+      const denom = Math.max(totalExecutions - 1, 1);
+      const flakyRate = Math.min(100, (flakyEvents / denom) * 100);
 
       flakyTests.push({
         testCaseId: tc.id,
         testTitle: tc.title,
         featureAreaId: tc.featureAreaId ?? '',
-        flakyCount,
+        flakyCount: flakyEvents,
         totalExecutions,
         flakyRate,
         lastFlakyAt:
@@ -891,7 +902,10 @@ export class DataService {
     const totalRuns = runs.length;
     const rerunCount = runs.filter((r) => r.isRerun).length;
     const originalRuns = runs.filter((r) => !r.isRerun);
-    const originalFailed = originalRuns.filter((r) => r.status === 'FAILED').length;
+    // Count FAILED, ERRORED, and CANCELLED as unsuccessful — previously only
+    // literal FAILED counted, so timed-out/cancelled CI runs slipped through
+    // and made Run Health look healthier than it actually was.
+    const originalFailed = originalRuns.filter((r) => isUnsuccessfulRun(r.status)).length;
 
     // Build daily breakdown
     const byDay = new Map<string, { original: number; reruns: number; passed: number; failed: number }>();
@@ -904,7 +918,7 @@ export class DataService {
         entry.original++;
       }
       if (run.status === 'PASSED') entry.passed++;
-      else if (run.status === 'FAILED') entry.failed++;
+      else if (isUnsuccessfulRun(run.status)) entry.failed++;
       byDay.set(day, entry);
     }
 
