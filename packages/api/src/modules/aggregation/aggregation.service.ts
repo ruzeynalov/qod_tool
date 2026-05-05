@@ -135,15 +135,28 @@ export class AggregationService {
     let flaky = 0;
     for (const tc of automatedTests) {
       if (tc.testResults.length === 0) continue;
+      // Per-run dedupe; promote a run's status to FLAKY if any retry within
+      // that run was FLAKY (matches DataService.getFlakyTests so the KPI does
+      // not disagree with the Flaky Tests widget).
       const byRun = new Map<string, { status: string; startedAt: Date }>();
       for (const r of tc.testResults) {
-        byRun.set(r.runId, { status: r.status, startedAt: runDateMap.get(r.runId)! });
+        const startedAt = runDateMap.get(r.runId)!;
+        const existing = byRun.get(r.runId);
+        const next = existing && existing.status === 'FLAKY'
+          ? existing.status
+          : (r.status === 'FLAKY' ? 'FLAKY' : r.status);
+        byRun.set(r.runId, { status: next, startedAt });
       }
-      const statuses = Array.from(byRun.values())
+      const ordered = Array.from(byRun.values())
         .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())
-        .map((r) => r.status)
-        .filter((s) => s === 'PASSED' || s === 'FAILED');
-      if (countTransitions(statuses) >= minTransitions) flaky++;
+        .map((r) => r.status);
+
+      // A test is flaky if it has at least one FLAKY run, OR enough
+      // PASS↔FAIL cross-run transitions. FLAKY is excluded from the
+      // transition list to avoid double-counting (matches getFlakyTests).
+      const hasFlakyRun = ordered.some((s) => s === 'FLAKY');
+      const passFailOnly = ordered.filter((s) => s === 'PASSED' || s === 'FAILED');
+      if (hasFlakyRun || countTransitions(passFailOnly) >= minTransitions) flaky++;
     }
     variables.flakyTestCount = flaky;
     return this.evaluateMetric(cfg, variables);

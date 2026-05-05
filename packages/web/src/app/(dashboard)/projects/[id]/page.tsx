@@ -92,7 +92,11 @@ function ExportPdfButton({ projectId }: { projectId: string }) {
     }).join('');
 
     const runs = runsData?.items ?? [];
-    const recentFailed = runs.filter((r) => r.status === 'FAILED').slice(0, 10).map((r) =>
+    // Match Run Health semantics: FAILED, ERRORED, and CANCELLED are all
+    // "not green". Filtering only FAILED here would omit timed-out and
+    // cancelled CI runs from the report even though they count against
+    // Run Health on the dashboard.
+    const recentFailed = runs.filter((r) => r.status === 'FAILED' || r.status === 'ERRORED' || r.status === 'CANCELLED').slice(0, 10).map((r) =>
       `<tr><td>${r.name ?? r.id.slice(0, 8)}</td><td><code>${r.branch ?? '—'}</code></td><td><span style="color:#dc2626;font-weight:600">${r.failedCount}</span> / ${r.totalTests}</td><td>${new Date(r.startedAt).toLocaleDateString()}</td></tr>`
     ).join('');
 
