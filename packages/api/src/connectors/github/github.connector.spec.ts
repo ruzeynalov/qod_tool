@@ -338,9 +338,122 @@ describe('GitHubConnector', () => {
       return zip.toBuffer();
     }
 
-    it('returns empty when no workflowFile configured', async () => {
+    it('falls back to all workflows when no workflowFile is configured', async () => {
+      // Without workflowFile we should still ingest workflow runs so failed/
+      // setup-only builds populate test_runs.  Use the all-workflows endpoint
+      // and filter by branch (default: main).
+      const run = mockWorkflowRun({ id: 555, run_number: 7, head_branch: 'main' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs')
+        .query({ per_page: '10', page: '1', branch: 'main' })
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/555/jobs')
+        .query(true)
+        .reply(200, { jobs: [] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/555/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [] });
+
       const results = await connector.fetchTestRuns!(makeConfig());
-      expect(results).toHaveLength(0);
+      expect(results).toHaveLength(1);
+      expect(results[0].externalId).toBe('gh-555');
+      expect(results[0].results).toHaveLength(0);
+    });
+
+    it('emits a NormalizedTestRun for failed builds with no artifacts', async () => {
+      // Lint/setup failures never upload Allure — they must still appear in
+      // test_runs so Run Health and Daily Run Results count them.
+      const run = mockWorkflowRun({
+        id: 666,
+        run_number: 13,
+        status: 'completed',
+        conclusion: 'failure',
+        head_branch: 'develop',
+      });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/666/jobs')
+        .query(true)
+        .reply(200, {
+          jobs: [
+            { id: 1, name: 'lint', conclusion: 'failure', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:00:30Z' },
+          ],
+        });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/666/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [] });
+
+      const results = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(results).toHaveLength(1);
+      expect(results[0].externalId).toBe('gh-666');
+      expect(results[0].status).toBe('FAILED');
+      expect(results[0].results).toHaveLength(0);
+    });
+
+    it('emits a run when only expired artifacts are present', async () => {
+      const run = mockWorkflowRun({ id: 777, run_number: 14, head_branch: 'develop', conclusion: 'success' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/777/jobs')
+        .query(true)
+        .reply(200, { jobs: [] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/777/artifacts')
+        .query(true)
+        .reply(200, {
+          artifacts: [
+            { id: 99, name: 'allure-results-shard-1', size_in_bytes: 500, expired: true },
+          ],
+        });
+
+      const results = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(results).toHaveLength(1);
+      expect(results[0].status).toBe('PASSED');
+      expect(results[0].results).toHaveLength(0);
+    });
+
+    it('maps GitHub conclusion to the correct test-run status', async () => {
+      const cancelledRun = mockWorkflowRun({ id: 81, status: 'completed', conclusion: 'cancelled', head_branch: 'develop' });
+      const timedOutRun = mockWorkflowRun({ id: 82, status: 'completed', conclusion: 'timed_out', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [cancelledRun, timedOutRun] });
+
+      for (const id of [81, 82]) {
+        nock(GITHUB_API)
+          .get(`/repos/my-org/my-repo/actions/runs/${id}/jobs`)
+          .query(true)
+          .reply(200, { jobs: [] });
+        nock(GITHUB_API)
+          .get(`/repos/my-org/my-repo/actions/runs/${id}/artifacts`)
+          .query(true)
+          .reply(200, { artifacts: [] });
+      }
+
+      const results = await connector.fetchTestRuns!(makeAllureConfig());
+      const byId = (id: string) => results.find((r) => r.externalId === id);
+      expect(byId('gh-81')?.status).toBe('CANCELLED');
+      expect(byId('gh-82')?.status).toBe('ERRORED');
     });
 
     it('downloads all shard artifacts and parses allure results', async () => {
@@ -474,7 +587,7 @@ describe('GitHubConnector', () => {
       expect(results[0].results).toHaveLength(2);
     });
 
-    it('deduplicates retry entries, preferring PASSED over FAILED', async () => {
+    it('marks retry-disagreement as FLAKY and keeps stable retries as PASSED/FAILED', async () => {
       const run = mockWorkflowRun({
         id: 777,
         run_number: 40,
@@ -522,11 +635,12 @@ describe('GitHubConnector', () => {
       expect(results).toHaveLength(1);
       // 2 unique tests, not 4
       expect(results[0].results).toHaveLength(2);
-      // C5001: retry passed, so final status is PASSED
-      const test5001 = results[0].results.find(r => r.testExternalId === '5001');
-      expect(test5001?.status).toBe('PASSED');
-      // C5002: both failed, so final status is FAILED
-      const test5002 = results[0].results.find(r => r.testExternalId === '5002');
+      // C5001: failed then passed → within-run retry disagreement = FLAKY.
+      // (Previously this collapsed to PASSED and hid the flakiness signal.)
+      const test5001 = results[0].results.find((r) => r.testExternalId === '5001');
+      expect(test5001?.status).toBe('FLAKY');
+      // C5002: both attempts failed → still FAILED.
+      const test5002 = results[0].results.find((r) => r.testExternalId === '5002');
       expect(test5002?.status).toBe('FAILED');
     });
 

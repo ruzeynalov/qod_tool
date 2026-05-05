@@ -1414,6 +1414,34 @@ describe('DataService', () => {
       );
     });
 
+    it('should flag a test with a single FLAKY result (within-run retry disagreement)', async () => {
+      // The GitHub connector now emits status='FLAKY' when retries inside a
+      // single run disagree.  A single such run is enough to mark the test
+      // flaky — we should not require additional cross-run transitions.
+      const dates = Array.from({ length: 3 }, (_, i) => new Date(2026, 2, i + 1));
+      mockRuns(dates.map((d, i) => ({ id: `run-${i + 1}`, startedAt: d })));
+
+      prisma.testCase.findMany.mockResolvedValue([
+        {
+          id: 'tc-flaky',
+          title: 'Login retried successfully',
+          suiteName: 'Auth',
+          featureAreaId: 'fa-1',
+          testResults: [
+            { status: 'PASSED', runId: 'run-1' },
+            { status: 'FLAKY', runId: 'run-2' },
+            { status: 'PASSED', runId: 'run-3' },
+          ],
+        },
+      ]);
+
+      const result = await service.getFlakyTests(projectId);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].testCaseId).toBe('tc-flaky');
+      expect(result[0].totalExecutions).toBe(3);
+    });
+
     it('should default featureAreaId to empty string when null', async () => {
       const dates = Array.from({ length: 5 }, (_, i) => new Date(Date.now() - i * 86400000));
       mockRuns(dates.map((d, i) => ({ id: `run-${i}`, startedAt: d })));

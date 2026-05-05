@@ -81,14 +81,17 @@ export class GitHubConnector implements IQODConnector {
 
   async fetchTestRuns(config: ConnectorConfig, _since?: Date): Promise<NormalizedTestRun[]> {
     const creds = this.extractCredentials(config);
-    if (!creds.workflowFile) return [];
-
     const branch = creds.branch || 'main';
     const maxRuns = creds.maxRuns || 10;
 
-    // 1. Fetch recent completed workflow runs for the configured branch
-    // Don't use `since` — maxRuns controls the fetch window.
-    const runs = await this.fetchBranchWorkflowRuns(creds, branch, maxRuns);
+    // 1. Fetch recent completed workflow runs.
+    // When workflowFile is configured, scope to that workflow + branch + completed.
+    // Otherwise fall back to all workflows for the branch — failed/setup-only runs
+    // still need to populate test_runs so Run Health, Daily Run Results, and Run
+    // History reflect them. (Don't use `since` — maxRuns controls the fetch window.)
+    const runs = creds.workflowFile
+      ? await this.fetchBranchWorkflowRuns(creds, branch, maxRuns)
+      : await this.fetchRecentWorkflowRuns(creds, maxRuns, undefined, branch);
     const testRuns: NormalizedTestRun[] = [];
 
     for (let i = 0; i < runs.length; i++) {
@@ -130,7 +133,8 @@ export class GitHubConnector implements IQODConnector {
           );
         }
       }
-      this.logger.log(`  Found ${matchingArtifacts.length} matching artifacts (${artifacts.length} total)`);
+      const expiredCount = artifacts.filter((a) => a.expired).length;
+      this.logger.log(`  Found ${matchingArtifacts.length} matching artifacts (${artifacts.length} total, ${expiredCount} expired)`);
 
       for (const artifact of matchingArtifacts) {
         try {
@@ -144,15 +148,16 @@ export class GitHubConnector implements IQODConnector {
         }
       }
 
+      // 5. Always emit a NormalizedTestRun for each completed workflow run,
+      // even when no test results could be parsed. Failed builds (lint/setup
+      // failures, expired artifacts, missing upload step) must still appear in
+      // test_runs so Run Health / Daily Run Results / Run History count them.
       if (allResults.length === 0) {
-        this.logger.log(`  No Allure results parsed, skipping`);
-        continue;
+        this.logger.log(`  No test results parsed — emitting run with empty results (conclusion=${run.conclusion ?? 'null'})`);
+      } else {
+        this.logger.log(`  Parsed ${allResults.length} Allure results`);
       }
-
-      // 5. Map to NormalizedTestRun
-      this.logger.log(`  Parsed ${allResults.length} Allure results`);
-      const testRun = this.mapAllureToTestRun(run, allResults, relevantJobs);
-      testRuns.push(testRun);
+      testRuns.push(this.mapAllureToTestRun(run, allResults, relevantJobs));
     }
 
     return testRuns;
@@ -231,11 +236,12 @@ export class GitHubConnector implements IQODConnector {
 
   // ──────────────── Private: Fetch runs ────────────────
 
-  /** Fetch up to maxRuns recent workflow runs, optionally filtered by since date. */
+  /** Fetch up to maxRuns recent workflow runs, optionally filtered by since date and branch. */
   private async fetchRecentWorkflowRuns(
     creds: GitHubCredentials,
     maxRuns: number,
     since?: Date,
+    branch?: string,
   ): Promise<GitHubWorkflowRun[]> {
     const basePath = creds.workflowFile
       ? `/repos/${creds.owner}/${creds.repo}/actions/workflows/${creds.workflowFile}/runs`
@@ -247,6 +253,9 @@ export class GitHubConnector implements IQODConnector {
     };
     if (since) {
       query.created = `>=${since.toISOString()}`;
+    }
+    if (branch) {
+      query.branch = branch;
     }
 
     this.logger.log(`Fetching workflow runs: ${basePath} query=${JSON.stringify(query)}`);
@@ -481,29 +490,52 @@ export class GitHubConnector implements IQODConnector {
     const updatedAt = new Date(run.updated_at);
     const durationMs = updatedAt.getTime() - startedAt.getTime();
 
-    // Deduplicate by externalId — Allure retries produce multiple entries per test.
-    // Keep the best result: PASSED wins over FAILED/ERROR (retry succeeded).
-    // Use TestRailId when available, otherwise generate ID from test name.
-    const byExternalId = new Map<string, AllureResult>();
+    // Group retry attempts by externalId so we can detect within-run flakiness.
+    // A test that flipped between PASSED and FAILED inside the same run is
+    // flaky by definition; squashing it to PASSED (the previous behaviour) hid
+    // the signal entirely from the Flaky Tests widget.
+    const attemptsByExternalId = new Map<string, AllureResult[]>();
     for (const r of allureResults) {
       const externalId = r.testRailId || this.generateTestId(r.name, r.suiteName);
-
-      const existing = byExternalId.get(externalId);
-      if (!existing || (existing.status !== 'PASSED' && r.status === 'PASSED')) {
-        byExternalId.set(externalId, r);
-      }
+      const list = attemptsByExternalId.get(externalId);
+      if (list) list.push(r);
+      else attemptsByExternalId.set(externalId, [r]);
     }
 
     const mappedResults: NormalizedTestResult[] = [];
-    for (const [externalId, r] of byExternalId.entries()) {
+    for (const [externalId, attempts] of attemptsByExternalId.entries()) {
+      const last = attempts[attempts.length - 1];
+      const hasPassed = attempts.some((a) => a.status === 'PASSED');
+      const hasFailed = attempts.some((a) => a.status === 'FAILED' || a.status === 'ERROR');
+
+      // Within-run retry disagreement → FLAKY.  Otherwise prefer the last
+      // attempt's status (final outcome), keeping the existing "retry-passed
+      // means passed" behaviour for consumers that still want a single status.
+      let status: NormalizedTestResult['status'];
+      if (attempts.length > 1 && hasPassed && hasFailed) {
+        status = 'FLAKY';
+      } else if (hasPassed) {
+        status = 'PASSED';
+      } else {
+        status = last.status;
+      }
+
+      // Surface the most informative failure (first non-passed attempt) when
+      // we end up FLAKY/FAILED, so the dashboard still shows a useful trace.
+      const failingAttempt = attempts.find(
+        (a) => a.status === 'FAILED' || a.status === 'ERROR',
+      );
+      const carrier = status === 'PASSED' ? last : (failingAttempt ?? last);
+
       mappedResults.push({
         testExternalId: externalId,
-        testTitle: r.name,
-        testSuiteName: r.suiteName,
-        status: r.status,
-        durationMs: r.durationMs,
-        errorMessage: r.errorMessage,
-        stackTrace: r.stackTrace,
+        testTitle: carrier.name,
+        testSuiteName: carrier.suiteName,
+        status,
+        durationMs: carrier.durationMs,
+        errorMessage: carrier.errorMessage,
+        stackTrace: carrier.stackTrace,
+        retryIndex: Math.max(attempts.length - 1, 0),
       });
     }
 
@@ -534,9 +566,40 @@ export class GitHubConnector implements IQODConnector {
       startedAt,
       finishedAt: updatedAt,
       durationMs,
-      status: run.conclusion === 'success' ? 'PASSED' : 'FAILED',
+      status: this.mapTestRunStatus(run.status, run.conclusion),
       results: mappedResults,
     };
+  }
+
+  /**
+   * Map a GitHub workflow run's (status, conclusion) to a NormalizedTestRun
+   * status.  The previous one-liner treated everything except `success` as
+   * `FAILED`, which lumped cancelled and infra-error runs in with real test
+   * failures and skewed Run Health.
+   */
+  private mapTestRunStatus(
+    status: string,
+    conclusion: string | null,
+  ): NormalizedTestRun['status'] {
+    if (status === 'queued') return 'QUEUED';
+    if (status !== 'completed') return 'RUNNING';
+    switch (conclusion) {
+      case 'success':
+        return 'PASSED';
+      case 'cancelled':
+        return 'CANCELLED';
+      case 'timed_out':
+      case 'action_required':
+      case 'stale':
+      case 'startup_failure':
+        return 'ERRORED';
+      case 'skipped':
+      case 'neutral':
+        return 'PASSED';
+      case 'failure':
+      default:
+        return 'FAILED';
+    }
   }
 
   private mapWorkflowRun(run: GitHubWorkflowRun, ghJobs: GitHubJob[]): NormalizedPipelineRun {

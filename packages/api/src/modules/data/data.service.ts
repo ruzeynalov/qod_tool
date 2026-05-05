@@ -789,49 +789,73 @@ export class DataService {
     for (const tc of testCases) {
       if (tc.testResults.length === 0) continue;
 
-      // Deduplicate: keep the latest result per run (last wins)
+      // Deduplicate: keep the latest result per run (last wins).
+      // We promote a run's status to FLAKY if any retry within that run was
+      // FLAKY — within-run retry disagreement is itself a flakiness signal,
+      // not just cross-run transitions.
       const byRun = new Map<string, { status: string; startedAt: Date }>();
       for (const r of tc.testResults) {
-        byRun.set(r.runId, {
-          status: r.status,
-          startedAt: runDateMap.get(r.runId)!,
-        });
+        const startedAt = runDateMap.get(r.runId)!;
+        const existing = byRun.get(r.runId);
+        const next = existing && existing.status === 'FLAKY'
+          ? existing.status
+          : (r.status === 'FLAKY' ? 'FLAKY' : r.status);
+        byRun.set(r.runId, { status: next, startedAt });
       }
 
       // Sort by run date, newest first
       const runStatuses = Array.from(byRun.values())
         .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
 
-      const relevant = runStatuses
-        .filter((r) => r.status === 'PASSED' || r.status === 'FAILED');
+      // Count direct FLAKY hits (within-run retry disagreement, surfaced by
+      // the GitHub connector or by report parsers).
+      const flakyRunsCount = runStatuses.filter((r) => r.status === 'FLAKY').length;
+      const lastFlakyRun = runStatuses.find((r) => r.status === 'FLAKY');
 
-      if (relevant.length < 2) continue;
-
-      // Count status transitions — a test is flaky if it flipped at least once
-      // fully (2+ transitions = PASS→FAIL→PASS or FAIL→PASS→FAIL)
+      // Count cross-run transitions. FLAKY runs are treated as a flip on
+      // either side, so a FLAKY result counts toward transitions.
+      const transitionRelevant = runStatuses.filter(
+        (r) => r.status === 'PASSED' || r.status === 'FAILED' || r.status === 'FLAKY',
+      );
       let transitions = 0;
       let lastTransitionAt: Date | null = null;
-      for (let i = 1; i < relevant.length; i++) {
-        if (relevant[i].status !== relevant[i - 1].status) {
+      for (let i = 1; i < transitionRelevant.length; i++) {
+        if (transitionRelevant[i].status !== transitionRelevant[i - 1].status) {
           transitions++;
           if (!lastTransitionAt) {
-            lastTransitionAt = relevant[i - 1].startedAt;
+            lastTransitionAt = transitionRelevant[i - 1].startedAt;
           }
         }
       }
 
-      if (transitions >= 2) {
-        const totalExecutions = runStatuses.length;
-        flakyTests.push({
-          testCaseId: tc.id,
-          testTitle: tc.title,
-          featureAreaId: tc.featureAreaId ?? '',
-          flakyCount: transitions,
-          totalExecutions,
-          flakyRate: (transitions / Math.max(relevant.length - 1, 1)) * 100,
-          lastFlakyAt: lastTransitionAt ?? runStatuses[0]?.startedAt ?? new Date(),
-        });
-      }
+      // A test is flaky if it has at least one FLAKY run, OR at least 2
+      // cross-run transitions (PASS→FAIL→PASS / FAIL→PASS→FAIL).
+      const isFlaky = flakyRunsCount > 0 || transitions >= 2;
+      if (!isFlaky) continue;
+
+      const totalExecutions = runStatuses.length;
+      const flakyCount = Math.max(flakyRunsCount, transitions);
+      // Rate denominator: prefer the transitionRelevant count (matches the
+      // cross-run case) but fall back to total executions.
+      const denom = Math.max(transitionRelevant.length - 1, 1);
+      const flakyRate = Math.min(
+        100,
+        ((flakyRunsCount + transitions) / denom) * 100,
+      );
+
+      flakyTests.push({
+        testCaseId: tc.id,
+        testTitle: tc.title,
+        featureAreaId: tc.featureAreaId ?? '',
+        flakyCount,
+        totalExecutions,
+        flakyRate,
+        lastFlakyAt:
+          lastFlakyRun?.startedAt ??
+          lastTransitionAt ??
+          runStatuses[0]?.startedAt ??
+          new Date(),
+      });
     }
 
     // Sort by most recently flaky first
