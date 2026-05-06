@@ -338,6 +338,22 @@ describe('GitHubConnector', () => {
       return zip.toBuffer();
     }
 
+    /**
+     * Build an Allure zip from raw JSON entries — lets tests verify TestRailId
+     * extraction from tms/links/name/etc. patterns that the simpler helper
+     * above does not cover.
+     */
+    function makeAllureZipRaw(entries: Array<Record<string, unknown>>): Buffer {
+      const zip = new AdmZip();
+      entries.forEach((json, i) => {
+        zip.addFile(
+          `allure-results-merged/${(json.name as string).replace(/\s/g, '_')}-${i}-result.json`,
+          Buffer.from(JSON.stringify(json)),
+        );
+      });
+      return zip.toBuffer();
+    }
+
     it('falls back to all workflows when no workflowFile is configured', async () => {
       // Without workflowFile we should still ingest workflow runs so failed/
       // setup-only builds populate test_runs.  Use the all-workflows endpoint
@@ -807,6 +823,104 @@ describe('GitHubConnector', () => {
       // С3942 (Cyrillic С U+0421) → 3942
       const t3942 = results[0].results.find(r => r.testExternalId === '3942');
       expect(t3942).toBeDefined();
+    });
+
+    it('extracts TestRailId from non-`TestRailId:` Allure conventions (tms / links / name)', async () => {
+      // Real-world Allure outputs vary. Repos that use @TmsLink, @AllureId, or
+      // just put the TestRail ID in the test name need to link to existing
+      // TestRail-defined test cases instead of getting a separate
+      // github-source auto-created test case (which is why the per-test-case
+      // history was missing GitHub runs for the user's `develop` branch).
+      const run = mockWorkflowRun({ id: 901, run_number: 90, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/901/jobs')
+        .query(true)
+        .reply(200, {
+          jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }],
+        });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/901/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [{ id: 901, name: 'allure-results-shard-1', size_in_bytes: 500, expired: false }] });
+
+      const zip = makeAllureZipRaw([
+        // tms label (Allure's @TmsLink lands here as `name: 'tms'`)
+        { uuid: 'a', name: 'Verify accrual activity 1', status: 'passed', start: 1, stop: 2,
+          labels: [{ name: 'tms', value: 'C4570' }] },
+        // bare-tag without 'TestRailId:' prefix
+        { uuid: 'b', name: 'Verify accrual activity 2', status: 'passed', start: 1, stop: 2,
+          labels: [{ name: 'tag', value: 'C4571' }] },
+        // links[] of type tms
+        { uuid: 'c', name: 'Verify accrual activity 3', status: 'passed', start: 1, stop: 2,
+          links: [{ type: 'tms', name: 'C4572', url: 'https://testrail/cases/4572' }] },
+        // links[] of type tms — only URL has the ID
+        { uuid: 'd', name: 'Verify accrual activity 4', status: 'passed', start: 1, stop: 2,
+          links: [{ type: 'tms', url: 'https://testrail.example/cases/C4573' }] },
+        // ID embedded in test name as a stand-alone token (last-resort)
+        { uuid: 'e', name: 'C4574: Verify accrual activity 5', status: 'passed', start: 1, stop: 2 },
+        // as_id label — Allure's @AllureId lands here as raw numeric
+        { uuid: 'f', name: 'Verify accrual activity 6', status: 'passed', start: 1, stop: 2,
+          labels: [{ name: 'as_id', value: '4575' }] },
+      ]);
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/901/zip')
+        .reply(200, zip, { 'Content-Type': 'application/zip' });
+
+      const out = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(out).toHaveLength(1);
+      const ids = new Set(out[0].results.map((r) => r.testExternalId));
+      // 4570..4575 should all be extracted as numeric IDs that match TestRail
+      expect(ids.has('4570')).toBe(true);
+      expect(ids.has('4571')).toBe(true);
+      expect(ids.has('4572')).toBe(true);
+      expect(ids.has('4573')).toBe(true);
+      expect(ids.has('4574')).toBe(true);
+      expect(ids.has('4575')).toBe(true);
+    });
+
+    it('does not match arbitrary tokens that look like TestRail IDs', async () => {
+      // Don't extract from substrings inside other identifiers ("PC1234"),
+      // and don't match short numeric tags that are likely sprint IDs etc.
+      const run = mockWorkflowRun({ id: 902, run_number: 91, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/902/jobs')
+        .query(true)
+        .reply(200, {
+          jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }],
+        });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/902/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [{ id: 902, name: 'allure-results-shard-1', size_in_bytes: 500, expired: false }] });
+
+      const zip = makeAllureZipRaw([
+        // Embedded inside another identifier — should NOT match
+        { uuid: 'x', name: 'PC1234 should not match', status: 'passed', start: 1, stop: 2 },
+        // 2-digit number after C — too short for our pattern, should NOT match
+        { uuid: 'y', name: 'C12 short id', status: 'passed', start: 1, stop: 2 },
+      ]);
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/902/zip')
+        .reply(200, zip, { 'Content-Type': 'application/zip' });
+
+      const out = await connector.fetchTestRuns!(makeAllureConfig());
+      // Both fall back to generated IDs (no testRailId extracted)
+      expect(out[0].results.find((r) => r.testExternalId === '1234')).toBeUndefined();
+      expect(out[0].results.find((r) => r.testExternalId === '12')).toBeUndefined();
     });
   });
 

@@ -432,20 +432,68 @@ export class GitHubConnector implements IQODConnector {
   }
 
   private parseAllureResult(json: AllureResultJson): AllureResult {
-    // Extract TestRailId from tag labels (e.g., { name: "tag", value: "TestRailId:C3538" })
+    // Extract TestRailId from any of:
+    //   - { name: 'tag', value: 'TestRailId:C3538' }       (existing custom convention)
+    //   - { name: 'tag', value: 'C3538' }                  (bare TestRail ID tag)
+    //   - { name: 'tms', value: 'C3538' }                  (Allure @TmsLink)
+    //   - { name: 'as_id' / 'allure-id', value: '3538' }   (Allure @AllureId)
+    //   - links[]: { type: 'tms', name: 'C3538' | url: '.../C3538' }
+    //   - the test name itself (e.g. "C3538: Verify ...")
+    // Many existing repos do not use the `TestRailId:` prefix tag — they rely
+    // on TmsLink or just a raw `C\d+` token. Without these fallbacks the
+    // GitHub run links to an auto-created github-source test case instead of
+    // the TestRail-defined one, which is why per-test history was missing
+    // GitHub runs even when they hit the same logical test.
     let testRailId: string | undefined;
     let suiteName: string | undefined;
 
+    const setIfFirst = (raw: string | undefined) => {
+      if (testRailId || !raw) return;
+      const id = raw.replace(/^\D+/, '');
+      if (id) testRailId = id;
+    };
+    const isTestRailIdToken = (s: string) =>
+      // ASCII C, Cyrillic С (U+0421), or doubled CC, optionally followed by digits.
+      /^(?:CC|[CС])?\d{2,}$/.test(s);
+
     for (const label of json.labels ?? []) {
-      if (label.name === 'tag' && label.value?.startsWith('TestRailId:')) {
-        // Extract numeric ID from "TestRailId:C3538". Strip all leading
-        // non-digit chars — handles ASCII "C", Cyrillic "С" (U+0421), and
-        // doubled prefixes like "CC3538".
-        const rawId = label.value.substring('TestRailId:'.length);
-        testRailId = rawId.replace(/^\D+/, '');
+      const name = label.name?.toLowerCase();
+      const value = label.value;
+      if (!value) continue;
+      if (name === 'tag') {
+        if (value.startsWith('TestRailId:')) {
+          setIfFirst(value.substring('TestRailId:'.length));
+        } else if (isTestRailIdToken(value)) {
+          setIfFirst(value);
+        }
+      } else if (name === 'tms' || name === 'testid' || name === 'as_id' || name === 'allure_id' || name === 'allure-id') {
+        setIfFirst(value);
+      } else if (name === 'suite') {
+        suiteName = value;
       }
-      if (label.name === 'suite' && label.value) {
-        suiteName = label.value;
+    }
+
+    if (!testRailId) {
+      for (const link of json.links ?? []) {
+        if (link.type?.toLowerCase() !== 'tms') continue;
+        // Prefer the explicit name; fall back to the trailing path segment of the URL.
+        const fromName = link.name && isTestRailIdToken(link.name) ? link.name : undefined;
+        const fromUrl = link.url?.split(/[/?#]/).filter(Boolean).pop();
+        setIfFirst(fromName ?? (fromUrl && isTestRailIdToken(fromUrl) ? fromUrl : undefined));
+      }
+    }
+
+    if (!testRailId) {
+      // Last-resort: scan the test name / fullName for a stand-alone "C\d+"
+      // (or Cyrillic equivalent) token. This is conservative — must be its
+      // own word, so titles like "PC3538-foo" or random "C12" don't match.
+      const haystacks = [json.name, json.fullName].filter(Boolean) as string[];
+      for (const text of haystacks) {
+        const m = text.match(/(?:^|[^a-zA-Z0-9])(?:CC|[CС])(\d{3,})(?=$|[^a-zA-Z0-9])/);
+        if (m) {
+          setIfFirst(m[1]);
+          break;
+        }
       }
     }
 
@@ -827,12 +875,14 @@ interface GitHubArtifact {
 interface AllureResultJson {
   uuid?: string;
   name: string;
+  fullName?: string;
   status: string;
   statusDetails?: {
     message?: string;
     trace?: string;
   };
   labels?: Array<{ name: string; value: string }>;
+  links?: Array<{ name?: string; url?: string; type?: string }>;
   start?: number;
   stop?: number;
 }
