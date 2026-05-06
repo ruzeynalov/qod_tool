@@ -106,7 +106,11 @@ export interface DemoTestRun {
   environment: string;
   startedAt: Date;
   durationMs: number;
-  status: 'PASSED' | 'FAILED';
+  // Mirrors NormalizedTestRun.status from the API. The demo generator only
+  // emits PASSED/FAILED today, but real production runs returned by the
+  // shared `useTestRuns` hook now include CANCELLED/ERRORED/etc. so the
+  // type must accept the full set.
+  status: 'QUEUED' | 'RUNNING' | 'PASSED' | 'FAILED' | 'CANCELLED' | 'ERRORED';
   totalTests: number;
   passedCount: number;
   failedCount: number;

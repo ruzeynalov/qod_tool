@@ -2,6 +2,18 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../database/prisma.service';
 import { Prisma } from '@prisma/client';
 
+/**
+ * Run statuses that count as "unsuccessful" for Run Health and Daily Run
+ * Results. CANCELLED and ERRORED runs are not green; treating them as passed
+ * (the previous default of "everything that isn't FAILED is implicitly OK")
+ * hid CI breakages from the dashboard.
+ */
+const UNSUCCESSFUL_RUN_STATUSES = ['FAILED', 'ERRORED', 'CANCELLED'] as const;
+
+function isUnsuccessfulRun(status: string): boolean {
+  return (UNSUCCESSFUL_RUN_STATUSES as readonly string[]).includes(status);
+}
+
 @Injectable()
 export class DataService {
   constructor(private readonly prisma: PrismaService) {}
@@ -530,7 +542,7 @@ export class DataService {
       entry.passed += run.passedCount;
       entry.totalRuns++;
       if (run.status === 'PASSED') entry.passedRuns++;
-      else if (run.status === 'FAILED') entry.failedRuns++;
+      else if (isUnsuccessfulRun(run.status)) entry.failedRuns++;
       byDay.set(day, entry);
     }
 
@@ -789,49 +801,80 @@ export class DataService {
     for (const tc of testCases) {
       if (tc.testResults.length === 0) continue;
 
-      // Deduplicate: keep the latest result per run (last wins)
+      // Deduplicate: keep the latest result per run (last wins).
+      // We promote a run's status to FLAKY if any retry within that run was
+      // FLAKY — within-run retry disagreement is itself a flakiness signal,
+      // not just cross-run transitions.
       const byRun = new Map<string, { status: string; startedAt: Date }>();
       for (const r of tc.testResults) {
-        byRun.set(r.runId, {
-          status: r.status,
-          startedAt: runDateMap.get(r.runId)!,
-        });
+        const startedAt = runDateMap.get(r.runId)!;
+        const existing = byRun.get(r.runId);
+        const next = existing && existing.status === 'FLAKY'
+          ? existing.status
+          : (r.status === 'FLAKY' ? 'FLAKY' : r.status);
+        byRun.set(r.runId, { status: next, startedAt });
       }
 
       // Sort by run date, newest first
       const runStatuses = Array.from(byRun.values())
         .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
 
-      const relevant = runStatuses
-        .filter((r) => r.status === 'PASSED' || r.status === 'FAILED');
+      // Count direct FLAKY hits (within-run retry disagreement, surfaced by
+      // the GitHub connector or by report parsers).
+      const flakyRunsCount = runStatuses.filter((r) => r.status === 'FLAKY').length;
+      const lastFlakyRun = runStatuses.find((r) => r.status === 'FLAKY');
 
-      if (relevant.length < 2) continue;
-
-      // Count status transitions — a test is flaky if it flipped at least once
-      // fully (2+ transitions = PASS→FAIL→PASS or FAIL→PASS→FAIL)
+      // Count PASS↔FAIL cross-run transitions. FLAKY rows are deliberately
+      // excluded here so we don't double-count them — a FLAKY between two
+      // PASSes would otherwise show as 2 transitions plus 1 direct hit.
+      const transitionRelevant = runStatuses.filter(
+        (r) => r.status === 'PASSED' || r.status === 'FAILED',
+      );
       let transitions = 0;
       let lastTransitionAt: Date | null = null;
-      for (let i = 1; i < relevant.length; i++) {
-        if (relevant[i].status !== relevant[i - 1].status) {
+      for (let i = 1; i < transitionRelevant.length; i++) {
+        if (transitionRelevant[i].status !== transitionRelevant[i - 1].status) {
           transitions++;
           if (!lastTransitionAt) {
-            lastTransitionAt = relevant[i - 1].startedAt;
+            lastTransitionAt = transitionRelevant[i - 1].startedAt;
           }
         }
       }
 
-      if (transitions >= 2) {
-        const totalExecutions = runStatuses.length;
-        flakyTests.push({
-          testCaseId: tc.id,
-          testTitle: tc.title,
-          featureAreaId: tc.featureAreaId ?? '',
-          flakyCount: transitions,
-          totalExecutions,
-          flakyRate: (transitions / Math.max(relevant.length - 1, 1)) * 100,
-          lastFlakyAt: lastTransitionAt ?? runStatuses[0]?.startedAt ?? new Date(),
-        });
-      }
+      // A test is flaky if it has at least one FLAKY run, OR at least 2
+      // PASS↔FAIL transitions (PASS→FAIL→PASS / FAIL→PASS→FAIL).
+      const isFlaky = flakyRunsCount > 0 || transitions >= 2;
+      if (!isFlaky) continue;
+
+      // Single source of truth for both count and rate numerator — pick the
+      // stronger signal between within-run flakes and cross-run transitions
+      // instead of summing them.
+      const flakyEvents = Math.max(flakyRunsCount, transitions);
+      const totalExecutions = runStatuses.length;
+      const denom = Math.max(totalExecutions - 1, 1);
+      const flakyRate = Math.min(100, (flakyEvents / denom) * 100);
+
+      // Use the newest of the two flakiness signals so the Flaky Tests list
+      // (sorted by lastFlakyAt desc) surfaces the most recently unstable
+      // tests first. Picking lastFlakyRun unconditionally would backdate the
+      // entry when an older FLAKY row coexists with a newer PASS↔FAIL
+      // transition — that's the mixed case Codex flagged.
+      const candidates = [lastFlakyRun?.startedAt, lastTransitionAt].filter(
+        (d): d is Date => d != null,
+      );
+      const lastFlakyAt = candidates.length > 0
+        ? new Date(Math.max(...candidates.map((d) => d.getTime())))
+        : (runStatuses[0]?.startedAt ?? new Date());
+
+      flakyTests.push({
+        testCaseId: tc.id,
+        testTitle: tc.title,
+        featureAreaId: tc.featureAreaId ?? '',
+        flakyCount: flakyEvents,
+        totalExecutions,
+        flakyRate,
+        lastFlakyAt,
+      });
     }
 
     // Sort by most recently flaky first
@@ -867,7 +910,10 @@ export class DataService {
     const totalRuns = runs.length;
     const rerunCount = runs.filter((r) => r.isRerun).length;
     const originalRuns = runs.filter((r) => !r.isRerun);
-    const originalFailed = originalRuns.filter((r) => r.status === 'FAILED').length;
+    // Count FAILED, ERRORED, and CANCELLED as unsuccessful — previously only
+    // literal FAILED counted, so timed-out/cancelled CI runs slipped through
+    // and made Run Health look healthier than it actually was.
+    const originalFailed = originalRuns.filter((r) => isUnsuccessfulRun(r.status)).length;
 
     // Build daily breakdown
     const byDay = new Map<string, { original: number; reruns: number; passed: number; failed: number }>();
@@ -880,7 +926,7 @@ export class DataService {
         entry.original++;
       }
       if (run.status === 'PASSED') entry.passed++;
-      else if (run.status === 'FAILED') entry.failed++;
+      else if (isUnsuccessfulRun(run.status)) entry.failed++;
       byDay.set(day, entry);
     }
 

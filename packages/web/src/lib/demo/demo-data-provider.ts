@@ -1092,12 +1092,19 @@ function computeDemoFlakyScalars(ds: DemoDataSet, p: FormulaParameters) {
 
   if (recentRuns.length > 0 && automatedTests.length > 0) {
     for (const tc of automatedTests) {
+      // Mirror DataService.getFlakyTests / AggregationService.computeFlakyRate:
+      // a test is flaky if it has at least one FLAKY result row, OR enough
+      // PASS↔FAIL cross-run transitions. FLAKY is excluded from the
+      // transition list to avoid double-counting.
+      let hasFlakyRun = false;
       const statuses: ('PASSED' | 'FAILED')[] = [];
       for (const run of recentRuns) {
         const r = run.results.find((rr) => rr.testCaseId === tc.id);
         if (!r) continue;
+        if (r.status === 'FLAKY') { hasFlakyRun = true; continue; }
         if (r.status === 'PASSED' || r.status === 'FAILED') statuses.push(r.status);
       }
+      if (hasFlakyRun) { flakyTestCount++; continue; }
       if (statuses.length < 2) continue;
       let transitions = 0;
       for (let i = 1; i < statuses.length; i++) {

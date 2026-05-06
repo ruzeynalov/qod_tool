@@ -937,6 +937,23 @@ describe('DataService', () => {
 
       expect(result).toHaveLength(5);
     });
+
+    it('counts ERRORED and CANCELLED runs in failedRuns', async () => {
+      const runs = [
+        { startedAt: new Date('2026-03-01T10:00:00Z'), status: 'PASSED', totalTests: 10, passedCount: 10 },
+        { startedAt: new Date('2026-03-01T11:00:00Z'), status: 'CANCELLED', totalTests: 0, passedCount: 0 },
+        { startedAt: new Date('2026-03-01T12:00:00Z'), status: 'ERRORED', totalTests: 0, passedCount: 0 },
+        { startedAt: new Date('2026-03-01T13:00:00Z'), status: 'FAILED', totalTests: 10, passedCount: 5 },
+      ];
+      prisma.testRun.findMany.mockResolvedValue(runs);
+
+      const result = await service.getPassRateTrend(projectId, 30);
+      const day = result.find((r) => r.date === '2026-03-01');
+      expect(day).toBeDefined();
+      expect(day!.totalRuns).toBe(4);
+      expect(day!.passedRuns).toBe(1);
+      expect(day!.failedRuns).toBe(3);
+    });
   });
 
   // ── getCoverageData ────────────────────────────────────────
@@ -1414,6 +1431,82 @@ describe('DataService', () => {
       );
     });
 
+    it('should flag a test with a single FLAKY result (within-run retry disagreement)', async () => {
+      // The GitHub connector now emits status='FLAKY' when retries inside a
+      // single run disagree.  A single such run is enough to mark the test
+      // flaky — we should not require additional cross-run transitions.
+      const dates = Array.from({ length: 3 }, (_, i) => new Date(2026, 2, i + 1));
+      mockRuns(dates.map((d, i) => ({ id: `run-${i + 1}`, startedAt: d })));
+
+      prisma.testCase.findMany.mockResolvedValue([
+        {
+          id: 'tc-flaky',
+          title: 'Login retried successfully',
+          suiteName: 'Auth',
+          featureAreaId: 'fa-1',
+          testResults: [
+            { status: 'PASSED', runId: 'run-1' },
+            { status: 'FLAKY', runId: 'run-2' },
+            { status: 'PASSED', runId: 'run-3' },
+          ],
+        },
+      ]);
+
+      const result = await service.getFlakyTests(projectId);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].testCaseId).toBe('tc-flaky');
+      expect(result[0].totalExecutions).toBe(3);
+      // Single FLAKY hit, no PASS↔FAIL transitions: flakyCount must be 1
+      // (the previous algorithm double-counted FLAKY as both a transition
+      // and a direct hit, which inflated this to 3).
+      expect(result[0].flakyCount).toBe(1);
+      // Rate denominator is totalExecutions - 1 = 2, numerator is 1 → 50%
+      expect(result[0].flakyRate).toBe(50);
+    });
+
+    it('uses the newest of FLAKY-row vs transition timestamps for lastFlakyAt', async () => {
+      // When a test has both an older FLAKY row and a newer PASS↔FAIL
+      // transition, lastFlakyAt must reflect the newer signal so the Flaky
+      // Tests list (sorted lastFlakyAt desc) does not hide the test behind
+      // genuinely older entries. Picking the FLAKY row unconditionally
+      // backdates the entry, which is what Codex flagged.
+      const oldFlakyDate = new Date(2026, 0, 1, 10, 0, 0);
+      const middlePass = new Date(2026, 1, 1, 10, 0, 0);
+      const recentFail = new Date(2026, 2, 1, 10, 0, 0);
+      const recentPass = new Date(2026, 2, 2, 10, 0, 0);
+
+      mockRuns([
+        { id: 'run-recentPass', startedAt: recentPass },
+        { id: 'run-recentFail', startedAt: recentFail },
+        { id: 'run-middlePass', startedAt: middlePass },
+        { id: 'run-oldFlaky', startedAt: oldFlakyDate },
+      ]);
+
+      prisma.testCase.findMany.mockResolvedValue([
+        {
+          id: 'tc-mixed',
+          title: 'Login mixed signals',
+          suiteName: 'Auth',
+          featureAreaId: 'fa-1',
+          testResults: [
+            { status: 'FLAKY', runId: 'run-oldFlaky' },
+            { status: 'PASSED', runId: 'run-middlePass' },
+            { status: 'FAILED', runId: 'run-recentFail' },
+            { status: 'PASSED', runId: 'run-recentPass' },
+          ],
+        },
+      ]);
+
+      const result = await service.getFlakyTests(projectId);
+
+      expect(result).toHaveLength(1);
+      // The most recent transition (PASSED on recentPass following FAILED on
+      // recentFail) is newer than the OLD FLAKY row — lastFlakyAt should
+      // surface that newer transition timestamp, not the older FLAKY one.
+      expect(result[0].lastFlakyAt.getTime()).toBe(recentPass.getTime());
+    });
+
     it('should default featureAreaId to empty string when null', async () => {
       const dates = Array.from({ length: 5 }, (_, i) => new Date(Date.now() - i * 86400000));
       mockRuns(dates.map((d, i) => ({ id: `run-${i}`, startedAt: d })));
@@ -1566,6 +1659,32 @@ describe('DataService', () => {
       const result = await service.getRerunStats(projectId);
 
       expect(result.rerunRate).toBe(33.3);
+    });
+
+    it('counts ERRORED and CANCELLED runs as unsuccessful', async () => {
+      // The GitHub connector now produces CANCELLED (cancelled workflow) and
+      // ERRORED (timed_out / startup_failure) statuses. Run Health and the
+      // Daily Run Results chart treat them as failed alongside FAILED;
+      // otherwise they inflate totalRuns without contributing to
+      // failedCount, masking real CI breakage as a "passed" run.
+      const runs = [
+        { startedAt: new Date('2026-03-01T10:00:00Z'), status: 'PASSED', isRerun: false },
+        { startedAt: new Date('2026-03-01T11:00:00Z'), status: 'CANCELLED', isRerun: false },
+        { startedAt: new Date('2026-03-01T12:00:00Z'), status: 'ERRORED', isRerun: false },
+        { startedAt: new Date('2026-03-01T13:00:00Z'), status: 'FAILED', isRerun: false },
+      ];
+      prisma.testRun.findMany.mockResolvedValue(runs);
+
+      const result = await service.getRerunStats(projectId);
+
+      // 4 original runs, 3 unsuccessful → 75%
+      expect(result.totalRuns).toBe(4);
+      expect(result.originalFailRate).toBe(75);
+
+      const day = result.rerunsByDay.find((d) => d.date === '2026-03-01');
+      expect(day).toBeDefined();
+      expect(day!.passed).toBe(1);
+      expect(day!.failed).toBe(3);
     });
   });
 

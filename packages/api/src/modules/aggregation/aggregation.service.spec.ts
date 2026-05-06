@@ -142,6 +142,39 @@ describe('AggregationService', () => {
       expect(result.value).toBe(50);
       expect(result.breakdown).toEqual({ flakyTestCount: 1, automatedTestCount: 2, runCount: 3 });
     });
+
+    it('counts a single FLAKY result row as flaky (no PASS↔FAIL transitions required)', async () => {
+      // The GitHub connector emits FLAKY when within-run retries disagree;
+      // the FLAKY_RATE KPI must surface that the same way getFlakyTests does,
+      // otherwise the dashboard widget and the KPI/alert engine disagree.
+      prisma.testRun.findMany.mockResolvedValueOnce([
+        { id: 'r1', startedAt: new Date(2026, 0, 5) },
+        { id: 'r2', startedAt: new Date(2026, 0, 4) },
+        { id: 'r3', startedAt: new Date(2026, 0, 3) },
+      ]);
+      prisma.testCase.findMany.mockResolvedValueOnce([
+        {
+          id: 'tc-flaky',
+          testResults: [
+            { status: 'PASSED', runId: 'r1' },
+            { status: 'FLAKY', runId: 'r2' },
+            { status: 'PASSED', runId: 'r3' },
+          ],
+        },
+        {
+          id: 'tc-stable',
+          testResults: [
+            { status: 'PASSED', runId: 'r1' },
+            { status: 'PASSED', runId: 'r2' },
+            { status: 'PASSED', runId: 'r3' },
+          ],
+        },
+      ]);
+
+      const result = await service.computeFlakyRate(projectId, defaults('FLAKY_RATE'));
+      expect(result.value).toBe(50);
+      expect(result.breakdown).toEqual({ flakyTestCount: 1, automatedTestCount: 2, runCount: 3 });
+    });
   });
 
   describe('computeMTTD()', () => {
