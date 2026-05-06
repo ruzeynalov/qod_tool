@@ -81,12 +81,25 @@ export class GitHubConnector implements IQODConnector {
 
   /**
    * Names of artifacts seen in the most recent fetchTestRuns call that did
-   * not match any default pattern. Sampled across all runs so SyncService
-   * can surface a configuration warning to the connector status.
+   * not match any default/configured pattern. Sampled across all runs so
+   * SyncService can surface a configuration warning to the connector status.
    */
   private lastSyncUnmatchedArtifactNames: string[] = [];
-  /** Number of completed runs in the last fetch where no artifact matched. */
+  /**
+   * Number of completed runs whose artifact NAMES did not match any pattern
+   * (configured or default). This is the "configure artifactPattern" signal.
+   */
   private lastSyncRunsWithoutMatchedArtifacts = 0;
+  /**
+   * Number of completed runs whose artifacts MATCHED a pattern but parsed
+   * zero test results — typically an HTML-only Allure report, a malformed
+   * JSON, or a non-default JSON layout. This is the "fix the workflow's
+   * artifact contents" signal, distinct from the name-mismatch above.
+   * Codex review: previously these two cases were collapsed into a single
+   * counter that the SyncService warning then mislabelled as "did not
+   * match the connector pattern".
+   */
+  private lastSyncRunsWithoutParsedResults = 0;
   /** Total completed runs processed in the last fetch. */
   private lastSyncCompletedRuns = 0;
 
@@ -94,11 +107,13 @@ export class GitHubConnector implements IQODConnector {
   getDiagnostics(): {
     completedRuns: number;
     runsWithoutMatchedArtifacts: number;
+    runsWithoutParsedResults: number;
     sampleUnmatchedArtifactNames: string[];
   } {
     return {
       completedRuns: this.lastSyncCompletedRuns,
       runsWithoutMatchedArtifacts: this.lastSyncRunsWithoutMatchedArtifacts,
+      runsWithoutParsedResults: this.lastSyncRunsWithoutParsedResults,
       sampleUnmatchedArtifactNames: this.lastSyncUnmatchedArtifactNames.slice(0, 20),
     };
   }
@@ -111,6 +126,7 @@ export class GitHubConnector implements IQODConnector {
     // Reset diagnostics for this sync.
     this.lastSyncUnmatchedArtifactNames = [];
     this.lastSyncRunsWithoutMatchedArtifacts = 0;
+    this.lastSyncRunsWithoutParsedResults = 0;
     this.lastSyncCompletedRuns = 0;
     const seenUnmatchedSet = new Set<string>();
 
@@ -165,6 +181,11 @@ export class GitHubConnector implements IQODConnector {
           `Configure 'artifactPattern' in connector settings if your repo uses a custom name.`,
         );
         for (const n of seenNames) seenUnmatchedSet.add(n);
+        // Codex review: only count this run as a name-mismatch when artifact
+        // names actually didn't match. The matched-but-empty case is
+        // counted separately below so the SyncService warning text stays
+        // accurate.
+        this.lastSyncRunsWithoutMatchedArtifacts++;
       }
 
       const parsedPerArtifact: Array<{ name: string; parsed: number }> = [];
@@ -186,13 +207,15 @@ export class GitHubConnector implements IQODConnector {
       }
 
       // Step 1: surface "matched-but-empty" specifically — distinct from
-      // the unmatched-name case above.
+      // the unmatched-name case above. Increments its own counter so the
+      // SyncService warning can be specific about which failure mode.
       if (matchingArtifacts.length > 0 && allResults.length === 0) {
         this.logger.warn(
           `  Matched ${matchingArtifacts.length} artifact(s) but parsed 0 test results: ` +
           parsedPerArtifact.map((p) => `${p.name}=${p.parsed}`).join(', ') +
           `. Artifact may contain only an HTML Allure report or a non-default JSON layout.`,
         );
+        this.lastSyncRunsWithoutParsedResults++;
       } else if (allResults.length > 0) {
         this.logger.log(
           `  Parsed ${allResults.length} test results: ` +
@@ -206,7 +229,6 @@ export class GitHubConnector implements IQODConnector {
       // test_runs so Run Health / Daily Run Results / Run History count them.
       if (allResults.length === 0) {
         this.logger.log(`  Emitting run with empty results (conclusion=${run.conclusion ?? 'null'})`);
-        this.lastSyncRunsWithoutMatchedArtifacts++;
       }
       testRuns.push(this.mapAllureToTestRun(run, allResults, relevantJobs));
     }

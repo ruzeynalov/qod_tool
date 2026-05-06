@@ -933,29 +933,52 @@ export class SyncService {
         addLog(`Fetched ${testRuns.length} test runs`);
 
         // Step 5: collect connector-side diagnostics (e.g. GitHub artifact-
-        // name mismatches) and surface them as a soft warning on the
-        // connector status. Hard errors keep using lastSyncError; this is
-        // the "sync ran fine but configuration looks suspect" channel.
+        // name mismatches or matched-but-empty artifacts) and surface them
+        // as a soft warning on the connector status. Hard errors keep using
+        // lastSyncError; this is the "sync ran fine but configuration looks
+        // suspect" channel. Codex review: name-mismatch and matched-but-
+        // empty are tracked as separate counters so the warning text stays
+        // accurate — pointing the user at `artifactPattern` only makes sense
+        // for the name-mismatch case.
         const diagFn = (connector as { getDiagnostics?: () => unknown }).getDiagnostics;
         if (typeof diagFn === 'function') {
           const diag = diagFn.call(connector) as {
             completedRuns?: number;
             runsWithoutMatchedArtifacts?: number;
+            runsWithoutParsedResults?: number;
             sampleUnmatchedArtifactNames?: string[];
           } | null;
-          if (
-            diag &&
-            (diag.runsWithoutMatchedArtifacts ?? 0) >= 3 &&
-            (diag.completedRuns ?? 0) > 0 &&
-            (diag.sampleUnmatchedArtifactNames?.length ?? 0) > 0
-          ) {
-            const sample = diag.sampleUnmatchedArtifactNames!.slice(0, 5).join(', ');
-            testRunSyncWarning =
-              `${diag.runsWithoutMatchedArtifacts}/${diag.completedRuns} runs uploaded artifacts ` +
-              `that did not match the connector pattern. ` +
-              `Saw [${sample}${diag.sampleUnmatchedArtifactNames!.length > 5 ? ', …' : ''}]. ` +
-              `Configure 'artifactPattern' in connector settings to point at your test-result artifacts.`;
-            addLog(`WARNING: ${testRunSyncWarning}`);
+          if (diag && (diag.completedRuns ?? 0) > 0) {
+            const completed = diag.completedRuns ?? 0;
+            const nameMismatchN = diag.runsWithoutMatchedArtifacts ?? 0;
+            const parseMissN = diag.runsWithoutParsedResults ?? 0;
+            const parts: string[] = [];
+
+            // Name-mismatch warning — actionable via `artifactPattern`.
+            if (nameMismatchN >= 3 && (diag.sampleUnmatchedArtifactNames?.length ?? 0) > 0) {
+              const sample = diag.sampleUnmatchedArtifactNames!.slice(0, 5).join(', ');
+              const more = diag.sampleUnmatchedArtifactNames!.length > 5 ? ', …' : '';
+              parts.push(
+                `${nameMismatchN}/${completed} runs uploaded artifacts that did not ` +
+                `match the connector pattern (saw [${sample}${more}]). ` +
+                `Configure 'artifactPattern' in connector settings.`,
+              );
+            }
+
+            // Matched-but-empty warning — different fix (workflow contents).
+            if (parseMissN >= 3) {
+              parts.push(
+                `${parseMissN}/${completed} runs had matching artifacts that parsed 0 ` +
+                `test results — likely an HTML-only Allure report or a non-default ` +
+                `JSON layout. Upload raw 'allure-results' (the *-result.json files) ` +
+                `from your workflow.`,
+              );
+            }
+
+            if (parts.length > 0) {
+              testRunSyncWarning = parts.join(' ');
+              addLog(`WARNING: ${testRunSyncWarning}`);
+            }
           }
         }
       }

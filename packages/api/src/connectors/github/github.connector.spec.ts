@@ -717,8 +717,67 @@ describe('GitHubConnector', () => {
 
       const diag = (connector as any).getDiagnostics();
       expect(diag.completedRuns).toBe(3);
+      // All three runs hit name-mismatch — the dedicated counter, not the
+      // generic "results empty" one (Codex review).
       expect(diag.runsWithoutMatchedArtifacts).toBe(3);
+      expect(diag.runsWithoutParsedResults).toBe(0);
       expect(diag.sampleUnmatchedArtifactNames).toContain('custom-e2e-results');
+    });
+
+    it('keeps name-mismatch and matched-but-empty diagnostics counters separate', async () => {
+      // Codex review: previously a single `runsWithoutMatchedArtifacts`
+      // counter incremented on BOTH conditions, so the SyncService warning
+      // text "did not match the connector pattern" lied for matched-but-
+      // empty cases. The diagnostics now expose both signals separately.
+      //
+      // Mixed scenario: 1 run with unmatched artifact name (custom-e2e),
+      // 1 run with a matched artifact whose zip contains nothing parseable.
+      const runUnmatched = mockWorkflowRun({ id: 940, run_number: 940, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+      const runMatchedEmpty = mockWorkflowRun({ id: 941, run_number: 941, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [runUnmatched, runMatchedEmpty] });
+
+      for (const id of [940, 941]) {
+        nock(GITHUB_API)
+          .get(`/repos/my-org/my-repo/actions/runs/${id}/jobs`)
+          .query(true)
+          .reply(200, { jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }] });
+      }
+
+      // Run 940: artifact name doesn't match anything → name-mismatch.
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/940/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [{ id: 940, name: 'custom-e2e-results', size_in_bytes: 500, expired: false }] });
+
+      // Run 941: name matches the strict shard pattern, but the zip is empty
+      // (no *-result.json files and no data/test-cases/*.json) → parsed 0.
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/941/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [{ id: 941, name: 'allure-results-shard-1', size_in_bytes: 100, expired: false }] });
+      const emptyZip = new AdmZip();
+      emptyZip.addFile('readme.txt', Buffer.from('not allure data'));
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/941/zip')
+        .reply(200, emptyZip.toBuffer(), { 'Content-Type': 'application/zip' });
+
+      const out = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(out).toHaveLength(2);
+      // Both runs end up with shard-fallback counts (CI_JOBS), but the
+      // diagnostics counters must distinguish *why*.
+      for (const r of out) expect(r.countSource).toBe('CI_JOBS');
+
+      const diag = (connector as any).getDiagnostics();
+      expect(diag.completedRuns).toBe(2);
+      expect(diag.runsWithoutMatchedArtifacts).toBe(1);
+      expect(diag.runsWithoutParsedResults).toBe(1);
+      // Only the unmatched run contributed to seenUnmatched.
+      expect(diag.sampleUnmatchedArtifactNames).toContain('custom-e2e-results');
+      expect(diag.sampleUnmatchedArtifactNames).not.toContain('allure-results-shard-1');
     });
 
     it('maps GitHub conclusion to the correct test-run status', async () => {
