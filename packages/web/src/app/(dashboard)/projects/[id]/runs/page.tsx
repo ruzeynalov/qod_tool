@@ -476,10 +476,14 @@ function RunHistorySection({ projectId }: { projectId: string }) {
         key: 'totalTests',
         header: 'Tests',
         render: (row: DemoTestRun) => (
+          // Fold errored into the red (failed) bucket so shard-only runs with
+          // timed_out / startup_failure jobs surface in the column instead of
+          // appearing as 0/0/0. The DB still tracks erroredCount separately
+          // on the run row for KPIs and analytics.
           <span className="text-xs">
             <span className="text-rag-green">{row.passedCount}</span>
             <span className="text-muted"> / </span>
-            <span className="text-rag-red">{row.failedCount}</span>
+            <span className="text-rag-red">{row.failedCount + (row.erroredCount ?? 0)}</span>
             <span className="text-muted"> / </span>
             <span className="text-secondary">{row.skippedCount}</span>
           </span>
@@ -609,7 +613,7 @@ function RunHistorySection({ projectId }: { projectId: string }) {
               <div className="mt-1 text-xs">
                 <span className="text-rag-green">{row.passedCount}P</span>
                 <span className="text-muted"> · </span>
-                <span className="text-rag-red">{row.failedCount}F</span>
+                <span className="text-rag-red">{row.failedCount + (row.erroredCount ?? 0)}F</span>
                 <span className="text-muted"> · </span>
                 <span className="text-secondary">{row.skippedCount}S</span>
               </div>

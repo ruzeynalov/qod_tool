@@ -187,6 +187,12 @@ export class DataService {
         passedCount: run.passedCount,
         failedCount: run.failedCount,
         skippedCount: run.skippedCount,
+        // Errored shards/jobs (CI-level) and ERROR test results were stored
+        // on test_run.errored_count but never returned, so a shard-only run
+        // with timed_out/startup_failure jobs displayed `0/0/0` in Run
+        // History. Now surfaced so the UI can fold it into the failed bucket
+        // (or render it separately).
+        erroredCount: run.erroredCount,
         flakyCount: run.flakyCount,
         pipelineRunId: run.pipelineRunId ?? '',
         isRerun: run.isRerun,

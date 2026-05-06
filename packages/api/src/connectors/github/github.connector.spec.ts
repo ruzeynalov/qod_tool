@@ -922,6 +922,60 @@ describe('GitHubConnector', () => {
       expect(out[0].results.find((r) => r.testExternalId === '1234')).toBeUndefined();
       expect(out[0].results.find((r) => r.testExternalId === '12')).toBeUndefined();
     });
+
+    it('rejects bare numeric tags and JIRA-style tokens (no false-positive linkage)', async () => {
+      // Codex flagged that the previous extraction was too permissive — a
+      // generic `tag` like `2026` (sprint/year tag) or a `tms` URL ending in
+      // `JIRA-456` could have been promoted to TestRail IDs and link a
+      // GitHub run to the wrong TestRail case. The tightened rules require
+      // an explicit `C`/`CC`/Cyrillic-`С` prefix on generic tags and the
+      // name fallback, and reject non-numeric values on ID-typed fields.
+      const run = mockWorkflowRun({ id: 903, run_number: 92, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/903/jobs')
+        .query(true)
+        .reply(200, {
+          jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }],
+        });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/903/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [{ id: 903, name: 'allure-results-shard-1', size_in_bytes: 500, expired: false }] });
+
+      const zip = makeAllureZipRaw([
+        // Bare numeric tag — must NOT be treated as a TestRail ID.
+        { uuid: 'a', name: 'Sprint year tag', status: 'passed', start: 1, stop: 2,
+          labels: [{ name: 'tag', value: '2026' }] },
+        // links[type=tms] pointing at a JIRA URL — non-numeric tail, must NOT match.
+        { uuid: 'b', name: 'Jira-tracked test', status: 'passed', start: 1, stop: 2,
+          links: [{ type: 'tms', url: 'https://jira.example/browse/JIRA-456' }] },
+        // links[type=tms] with non-numeric `name` — must NOT match.
+        { uuid: 'c', name: 'Bad tms name', status: 'passed', start: 1, stop: 2,
+          links: [{ type: 'tms', name: 'JIRA-789' }] },
+        // Bare `tag` value with `C` prefix — SHOULD still match (positive control).
+        { uuid: 'd', name: 'TestRail-prefixed tag', status: 'passed', start: 1, stop: 2,
+          labels: [{ name: 'tag', value: 'C7777' }] },
+      ]);
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/903/zip')
+        .reply(200, zip, { 'Content-Type': 'application/zip' });
+
+      const out = await connector.fetchTestRuns!(makeAllureConfig());
+      const ids = new Set(out[0].results.map((r) => r.testExternalId));
+      // Negative cases — none of these should produce numeric TestRail IDs.
+      expect(ids.has('2026')).toBe(false);
+      expect(ids.has('456')).toBe(false);
+      expect(ids.has('789')).toBe(false);
+      // Positive control — the C-prefixed tag still extracts correctly.
+      expect(ids.has('7777')).toBe(true);
+    });
   });
 
   // ──────────────── Rate limiting ────────────────

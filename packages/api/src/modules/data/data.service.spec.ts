@@ -345,6 +345,7 @@ describe('DataService', () => {
       failedCount: 3,
       skippedCount: 2,
       flakyCount: 1,
+      erroredCount: 0,
       pipelineRunId: 'pipe-1',
       isRerun: false,
       originalRunId: null,
@@ -443,6 +444,24 @@ describe('DataService', () => {
 
       expect(result.items).toEqual([]);
       expect(result.totalPages).toBe(0);
+    });
+
+    it('exposes erroredCount so the UI can fold it into the failed bucket', async () => {
+      // The Run History "Tests" column was previously rendering 0/0/0 for
+      // shard-only runs whose summaryCounts populated `erroredCount` only
+      // (timed_out / startup_failure shards). The API must now return
+      // `erroredCount` alongside the other counts.
+      const run = makeRun('run-errored', {
+        passedCount: 0,
+        failedCount: 0,
+        skippedCount: 0,
+        erroredCount: 3,
+      });
+      prisma.testRun.findMany.mockResolvedValue([run]);
+      prisma.testRun.count.mockResolvedValue(1);
+
+      const result = await service.getTestRuns(projectId, {});
+      expect(result.items[0].erroredCount).toBe(3);
     });
   });
 

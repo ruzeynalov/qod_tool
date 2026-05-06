@@ -434,27 +434,51 @@ export class GitHubConnector implements IQODConnector {
   private parseAllureResult(json: AllureResultJson): AllureResult {
     // Extract TestRailId from any of:
     //   - { name: 'tag', value: 'TestRailId:C3538' }       (existing custom convention)
-    //   - { name: 'tag', value: 'C3538' }                  (bare TestRail ID tag)
-    //   - { name: 'tms', value: 'C3538' }                  (Allure @TmsLink)
-    //   - { name: 'as_id' / 'allure-id', value: '3538' }   (Allure @AllureId)
+    //   - { name: 'tag', value: 'C3538' }                  (bare TestRail ID tag, REQUIRES C/CC/Cyrillic-С prefix)
+    //   - { name: 'tms', value: 'C3538' | '3538' }         (Allure @TmsLink — bare numeric allowed, field is ID-typed)
+    //   - { name: 'as_id' / 'allure-id', value: '3538' }   (Allure @AllureId — bare numeric allowed)
     //   - links[]: { type: 'tms', name: 'C3538' | url: '.../C3538' }
-    //   - the test name itself (e.g. "C3538: Verify ...")
-    // Many existing repos do not use the `TestRailId:` prefix tag — they rely
-    // on TmsLink or just a raw `C\d+` token. Without these fallbacks the
-    // GitHub run links to an auto-created github-source test case instead of
-    // the TestRail-defined one, which is why per-test history was missing
-    // GitHub runs even when they hit the same logical test.
+    //   - the test name / fullName (e.g. "C3538: Verify ...") — REQUIRES C-prefix
+    //
+    // Validation rules (Codex review): generic `tag` and the name fallback
+    // must require an explicit `C`/`CC`/Cyrillic-`С` prefix so that plain
+    // numeric tags like `2026` (e.g. a sprint or year tag) are not accidentally
+    // promoted to TestRail IDs. Explicit ID-typed fields (`tms`, `as_id`,
+    // links[type=tms]) carry ID semantics and may use a bare numeric value,
+    // but the captured token still has to be purely digits — `JIRA-123` must
+    // not normalize to `123`.
     let testRailId: string | undefined;
     let suiteName: string | undefined;
 
-    const setIfFirst = (raw: string | undefined) => {
+    /** Accepts only purely numeric ID values (≥2 digits). */
+    const setBareNumeric = (raw: string | undefined) => {
       if (testRailId || !raw) return;
-      const id = raw.replace(/^\D+/, '');
-      if (id) testRailId = id;
+      const trimmed = raw.trim();
+      if (/^\d{2,}$/.test(trimmed)) testRailId = trimmed;
     };
-    const isTestRailIdToken = (s: string) =>
-      // ASCII C, Cyrillic С (U+0421), or doubled CC, optionally followed by digits.
-      /^(?:CC|[CС])?\d{2,}$/.test(s);
+
+    /** Accepts a `C`/`CC`/Cyrillic-`С` prefixed token, strips the prefix. */
+    const setPrefixed = (raw: string | undefined) => {
+      if (testRailId || !raw) return;
+      const m = raw.trim().match(/^(?:CC|[CС])(\d{2,})$/);
+      if (m) testRailId = m[1];
+    };
+
+    /**
+     * Accepts an ID-typed field's value (e.g. tms / as_id / links[type=tms]).
+     * Allows either a `C`-prefixed token or a bare numeric — these fields
+     * already advertise ID semantics so `4570` is meaningful.
+     */
+    const setFromIdField = (raw: string | undefined) => {
+      if (testRailId || !raw) return;
+      const trimmed = raw.trim();
+      const prefixed = trimmed.match(/^(?:CC|[CС])(\d{2,})$/);
+      if (prefixed) {
+        testRailId = prefixed[1];
+        return;
+      }
+      if (/^\d{2,}$/.test(trimmed)) testRailId = trimmed;
+    };
 
     for (const label of json.labels ?? []) {
       const name = label.name?.toLowerCase();
@@ -462,12 +486,16 @@ export class GitHubConnector implements IQODConnector {
       if (!value) continue;
       if (name === 'tag') {
         if (value.startsWith('TestRailId:')) {
-          setIfFirst(value.substring('TestRailId:'.length));
-        } else if (isTestRailIdToken(value)) {
-          setIfFirst(value);
+          // The custom `TestRailId:` prefix already advertises ID intent — the
+          // value after it may be `C4570` or just `4570`.
+          setFromIdField(value.substring('TestRailId:'.length));
+        } else {
+          // Generic tag — only accept C-prefixed tokens to avoid false
+          // matches on year/sprint/etc. numeric tags.
+          setPrefixed(value);
         }
       } else if (name === 'tms' || name === 'testid' || name === 'as_id' || name === 'allure_id' || name === 'allure-id') {
-        setIfFirst(value);
+        setFromIdField(value);
       } else if (name === 'suite') {
         suiteName = value;
       }
@@ -476,22 +504,28 @@ export class GitHubConnector implements IQODConnector {
     if (!testRailId) {
       for (const link of json.links ?? []) {
         if (link.type?.toLowerCase() !== 'tms') continue;
-        // Prefer the explicit name; fall back to the trailing path segment of the URL.
-        const fromName = link.name && isTestRailIdToken(link.name) ? link.name : undefined;
-        const fromUrl = link.url?.split(/[/?#]/).filter(Boolean).pop();
-        setIfFirst(fromName ?? (fromUrl && isTestRailIdToken(fromUrl) ? fromUrl : undefined));
+        // Prefer the explicit name; fall back to the trailing path segment of
+        // the URL. Both must be a C-prefixed or bare-numeric ID token —
+        // `https://jira.example/browse/JIRA-456` should NOT match.
+        if (link.name) setFromIdField(link.name);
+        if (!testRailId && link.url) {
+          const tail = link.url.split(/[/?#]/).filter(Boolean).pop();
+          setFromIdField(tail);
+        }
       }
     }
 
     if (!testRailId) {
       // Last-resort: scan the test name / fullName for a stand-alone "C\d+"
-      // (or Cyrillic equivalent) token. This is conservative — must be its
-      // own word, so titles like "PC3538-foo" or random "C12" don't match.
+      // (or Cyrillic equivalent) token. The C prefix is required here too —
+      // bare numeric tokens in test titles are too ambiguous to trust.
       const haystacks = [json.name, json.fullName].filter(Boolean) as string[];
       for (const text of haystacks) {
         const m = text.match(/(?:^|[^a-zA-Z0-9])(?:CC|[CС])(\d{3,})(?=$|[^a-zA-Z0-9])/);
         if (m) {
-          setIfFirst(m[1]);
+          // Already a digits-only capture group; assign directly so we don't
+          // re-validate against the prefixed regex.
+          testRailId = m[1];
           break;
         }
       }

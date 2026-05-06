@@ -97,7 +97,7 @@ function ExportPdfButton({ projectId }: { projectId: string }) {
     // cancelled CI runs from the report even though they count against
     // Run Health on the dashboard.
     const recentFailed = runs.filter((r) => r.status === 'FAILED' || r.status === 'ERRORED' || r.status === 'CANCELLED').slice(0, 10).map((r) =>
-      `<tr><td>${r.name ?? r.id.slice(0, 8)}</td><td><code>${r.branch ?? '—'}</code></td><td><span style="color:#dc2626;font-weight:600">${r.failedCount}</span> / ${r.totalTests}</td><td>${new Date(r.startedAt).toLocaleDateString()}</td></tr>`
+      `<tr><td>${r.name ?? r.id.slice(0, 8)}</td><td><code>${r.branch ?? '—'}</code></td><td><span style="color:#dc2626;font-weight:600">${r.failedCount + (r.erroredCount ?? 0)}</span> / ${r.totalTests}</td><td>${new Date(r.startedAt).toLocaleDateString()}</td></tr>`
     ).join('');
 
     const flakyRows = flaky.slice(0, 10).map((t) => {
@@ -488,8 +488,8 @@ export default function ProjectOverviewPage() {
                   <div className="mt-2 ml-11 flex items-center gap-3 text-xs">
                     <span className="font-medium text-secondary">{run.totalTests} tests</span>
                     <span className="text-rag-green">{run.passedCount} passed</span>
-                    {run.failedCount > 0 && (
-                      <span className="text-rag-red">{run.failedCount} failed</span>
+                    {(run.failedCount + (run.erroredCount ?? 0)) > 0 && (
+                      <span className="text-rag-red">{run.failedCount + (run.erroredCount ?? 0)} failed</span>
                     )}
                     {run.skippedCount > 0 && (
                       <span className="text-muted">{run.skippedCount} skipped</span>
