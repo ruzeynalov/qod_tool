@@ -374,6 +374,82 @@ describe('SyncService', () => {
       expect(runCall.create.passedCount).toBe(1);
       expect(runCall.create.failedCount).toBe(1);
     });
+
+    it('uses connector-supplied summaryCounts when results array is empty', async () => {
+      // Repro for "(15 shards passed) → 0/0/0" — when the GitHub connector
+      // can't parse Allure but supplies shard-derived counts, the test_run
+      // row should reflect those counts instead of all zeros.
+      const testRuns: NormalizedTestRun[] = [
+        {
+          externalId: 'RUN-noart',
+          name: 'CI Run #100 (15 shards passed)',
+          triggerType: 'CI_PUSH',
+          branch: 'develop',
+          startedAt: new Date('2026-04-26T10:00:00Z'),
+          status: 'PASSED',
+          results: [],
+          summaryCounts: {
+            totalTests: 15,
+            passedCount: 15,
+            failedCount: 0,
+            skippedCount: 0,
+            erroredCount: 0,
+          },
+        },
+      ];
+
+      prisma.testCase.findMany.mockResolvedValue([]);
+      prisma.testRun.upsert.mockResolvedValue({ id: 'run-noart' });
+      prisma.testResult.deleteMany.mockResolvedValue({ count: 0 });
+
+      await service.syncTestRuns(PROJECT_ID, CONNECTOR_CONFIG_ID, testRuns, SOURCE);
+
+      const runCall = prisma.testRun.upsert.mock.calls[0][0];
+      expect(runCall.create.totalTests).toBe(15);
+      expect(runCall.create.passedCount).toBe(15);
+      expect(runCall.create.failedCount).toBe(0);
+      // No test_results created because results array is empty
+      expect(prisma.testResult.createMany).not.toHaveBeenCalled();
+    });
+
+    it('ignores summaryCounts when results array is non-empty (per-test data wins)', async () => {
+      const testRuns: NormalizedTestRun[] = [
+        {
+          externalId: 'RUN-with-results',
+          name: 'CI Run #101',
+          triggerType: 'CI_PUSH',
+          branch: 'develop',
+          startedAt: new Date('2026-04-26T10:00:00Z'),
+          status: 'PASSED',
+          results: [
+            {
+              testExternalId: 'TC-1',
+              testTitle: 'Login',
+              status: 'PASSED',
+            },
+          ],
+          // Misleading summaryCounts — these MUST be ignored when results exist.
+          summaryCounts: {
+            totalTests: 999,
+            passedCount: 999,
+            failedCount: 0,
+          },
+        },
+      ];
+
+      prisma.testCase.findMany.mockResolvedValue([
+        { id: 'tc-uuid', externalId: 'TC-1', source: SOURCE, automationStatus: 'AUTOMATED' },
+      ]);
+      prisma.testRun.upsert.mockResolvedValue({ id: 'run-with-results' });
+      prisma.testResult.createMany.mockResolvedValue({ count: 1 });
+      prisma.testResult.deleteMany.mockResolvedValue({ count: 0 });
+
+      await service.syncTestRuns(PROJECT_ID, CONNECTOR_CONFIG_ID, testRuns, SOURCE);
+
+      const runCall = prisma.testRun.upsert.mock.calls[0][0];
+      expect(runCall.create.totalTests).toBe(1);
+      expect(runCall.create.passedCount).toBe(1);
+    });
   });
 
   // ── syncDefects ─────────────────────────────────────────────

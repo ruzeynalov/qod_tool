@@ -59,6 +59,21 @@ export interface NormalizedTestRun {
   isRerun?: boolean;
   originalRunExternalId?: string;
   pipelineRunExternalId?: string;
+  /**
+   * Optional connector-supplied run-level counts. Used by SyncService when
+   * `results` is empty — e.g. GitHub workflow runs whose Allure artifacts
+   * are missing or use a non-default naming pattern. The connector can still
+   * populate run totals from CI-level signals (shard/job conclusions) so
+   * Run History shows non-zero stats even without per-test data.
+   */
+  summaryCounts?: {
+    totalTests: number;
+    passedCount: number;
+    failedCount: number;
+    skippedCount?: number;
+    erroredCount?: number;
+    flakyCount?: number;
+  };
 }
 
 export interface NormalizedTestResult {

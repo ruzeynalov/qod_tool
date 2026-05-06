@@ -296,7 +296,20 @@ export class SyncService {
 
     for (const run of testRuns) {
       try {
-        const resultCounts = countResultStatuses(run.results);
+        // Prefer connector-supplied summaryCounts when per-test results are
+        // empty — e.g. GitHub workflow runs without parseable Allure
+        // artifacts but with shard/job conclusions. Otherwise compute counts
+        // from the actual test_results.
+        const resultCounts = run.results.length === 0 && run.summaryCounts
+          ? {
+              totalTests: run.summaryCounts.totalTests,
+              passedCount: run.summaryCounts.passedCount,
+              failedCount: run.summaryCounts.failedCount,
+              skippedCount: run.summaryCounts.skippedCount ?? 0,
+              erroredCount: run.summaryCounts.erroredCount ?? 0,
+              flakyCount: run.summaryCounts.flakyCount ?? 0,
+            }
+          : countResultStatuses(run.results);
 
         const existing = existingRunSet.has(run.externalId);
 

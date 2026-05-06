@@ -368,7 +368,9 @@ describe('GitHubConnector', () => {
 
     it('emits a NormalizedTestRun for failed builds with no artifacts', async () => {
       // Lint/setup failures never upload Allure — they must still appear in
-      // test_runs so Run Health and Daily Run Results count them.
+      // test_runs so Run Health and Daily Run Results count them. When per-
+      // test data is unavailable the connector falls back to job conclusions
+      // for run-level counts so the Run History "Tests" column is non-zero.
       const run = mockWorkflowRun({
         id: 666,
         run_number: 13,
@@ -401,6 +403,110 @@ describe('GitHubConnector', () => {
       expect(results[0].externalId).toBe('gh-666');
       expect(results[0].status).toBe('FAILED');
       expect(results[0].results).toHaveLength(0);
+      // 1 lint job, conclusion=failure → 1 failed unit
+      expect(results[0].summaryCounts).toEqual({
+        totalTests: 1,
+        passedCount: 0,
+        failedCount: 1,
+        skippedCount: 0,
+        erroredCount: 0,
+      });
+    });
+
+    it('falls back to shard counts when shards passed but no Allure artifacts uploaded', async () => {
+      // Repro for the "(15 shards passed) → 0/0/0" issue: workflow ran 15
+      // sharded jobs all green but never uploaded Allure artifacts (or
+      // uploaded under a non-default name). The Run History column was
+      // showing 0/0/0; with the shard-count fallback it should now show
+      // passed=15 / failed=0 / skipped=0.
+      const run = mockWorkflowRun({
+        id: 6266,
+        run_number: 6266,
+        status: 'completed',
+        conclusion: 'success',
+        head_branch: 'develop',
+      });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      const shardCount = 15;
+      const jobs = Array.from({ length: shardCount }, (_, i) => ({
+        id: 1000 + i,
+        name: `E2E Tests (Shard ${i + 1} of ${shardCount})`,
+        conclusion: 'success',
+        started_at: '2025-01-15T10:00:00Z',
+        completed_at: '2025-01-15T10:30:00Z',
+      }));
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/6266/jobs')
+        .query(true)
+        .reply(200, { jobs });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/6266/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [] });
+
+      const results = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(results).toHaveLength(1);
+      expect(results[0].status).toBe('PASSED');
+      expect(results[0].results).toHaveLength(0);
+      expect(results[0].summaryCounts).toEqual({
+        totalTests: 15,
+        passedCount: 15,
+        failedCount: 0,
+        skippedCount: 0,
+        erroredCount: 0,
+      });
+    });
+
+    it('does not emit summaryCounts when per-test results are present', async () => {
+      // When Allure data IS parsed, results take precedence — summaryCounts
+      // must stay undefined so SyncService keeps using per-test counts.
+      const run = mockWorkflowRun({
+        id: 970,
+        run_number: 970,
+        status: 'completed',
+        conclusion: 'success',
+        head_branch: 'develop',
+      });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/970/jobs')
+        .query(true)
+        .reply(200, {
+          jobs: [
+            { id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' },
+          ],
+        });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/970/artifacts')
+        .query(true)
+        .reply(200, {
+          artifacts: [
+            { id: 970, name: 'allure-results-shard-1', size_in_bytes: 500, expired: false },
+          ],
+        });
+
+      const zip = makeAllureResultZip([
+        { name: 'Login', status: 'passed', testRailId: 'C9001' },
+      ]);
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/970/zip')
+        .reply(200, zip, { 'Content-Type': 'application/zip' });
+
+      const results = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(results[0].results).toHaveLength(1);
+      expect(results[0].summaryCounts).toBeUndefined();
     });
 
     it('emits a run when only expired artifacts are present', async () => {

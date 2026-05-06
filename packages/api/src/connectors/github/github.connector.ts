@@ -564,6 +564,15 @@ export class GitHubConnector implements IQODConnector {
         : `(${shardJobs.length} job${shardJobs.length !== 1 ? 's' : ''} passed)`;
     }
 
+    // When no per-test data parsed (artifacts missing / non-standard naming /
+    // expired), fall back to shard/job conclusions so Run History still shows
+    // non-zero counts. Each shard or job is treated as one "execution unit".
+    // This avoids creating synthetic per-shard test_cases while keeping the
+    // pass-rate column meaningful.
+    const summaryCounts = mappedResults.length === 0 && shardJobs.length > 0
+      ? this.shardJobsToSummaryCounts(shardJobs)
+      : undefined;
+
     return {
       externalId: `gh-${run.id}`,
       name: `${run.name} #${run.run_number} ${nameSuffix}`,
@@ -575,6 +584,57 @@ export class GitHubConnector implements IQODConnector {
       durationMs,
       status: this.mapTestRunStatus(run.status, run.conclusion),
       results: mappedResults,
+      ...(summaryCounts ? { summaryCounts } : {}),
+    };
+  }
+
+  /**
+   * Derive run-level counts from job conclusions when per-test results are
+   * unavailable. One unit per shard/job; conclusion → status mapping mirrors
+   * mapTestRunStatus so a `cancelled` shard counts as skipped/cancelled, not
+   * passed.
+   */
+  private shardJobsToSummaryCounts(jobs: GitHubJob[]): {
+    totalTests: number;
+    passedCount: number;
+    failedCount: number;
+    skippedCount: number;
+    erroredCount: number;
+  } {
+    let passed = 0;
+    let failed = 0;
+    let skipped = 0;
+    let errored = 0;
+    for (const job of jobs) {
+      switch (job.conclusion) {
+        case 'success':
+          passed++;
+          break;
+        case 'failure':
+          failed++;
+          break;
+        case 'cancelled':
+        case 'skipped':
+        case 'neutral':
+          skipped++;
+          break;
+        case 'timed_out':
+        case 'startup_failure':
+        case 'action_required':
+        case 'stale':
+          errored++;
+          break;
+        default:
+          // null / unknown → treat as failure-like
+          failed++;
+      }
+    }
+    return {
+      totalTests: jobs.length,
+      passedCount: passed,
+      failedCount: failed,
+      skippedCount: skipped,
+      erroredCount: errored,
     };
   }
 
