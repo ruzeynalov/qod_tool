@@ -79,10 +79,40 @@ export class GitHubConnector implements IQODConnector {
 
   // ──────────────── Test Runs (Allure Artifacts) ────────────────
 
+  /**
+   * Names of artifacts seen in the most recent fetchTestRuns call that did
+   * not match any default pattern. Sampled across all runs so SyncService
+   * can surface a configuration warning to the connector status.
+   */
+  private lastSyncUnmatchedArtifactNames: string[] = [];
+  /** Number of completed runs in the last fetch where no artifact matched. */
+  private lastSyncRunsWithoutMatchedArtifacts = 0;
+  /** Total completed runs processed in the last fetch. */
+  private lastSyncCompletedRuns = 0;
+
+  /** Diagnostics from the most recent fetchTestRuns call (used by SyncService). */
+  getDiagnostics(): {
+    completedRuns: number;
+    runsWithoutMatchedArtifacts: number;
+    sampleUnmatchedArtifactNames: string[];
+  } {
+    return {
+      completedRuns: this.lastSyncCompletedRuns,
+      runsWithoutMatchedArtifacts: this.lastSyncRunsWithoutMatchedArtifacts,
+      sampleUnmatchedArtifactNames: this.lastSyncUnmatchedArtifactNames.slice(0, 20),
+    };
+  }
+
   async fetchTestRuns(config: ConnectorConfig, _since?: Date): Promise<NormalizedTestRun[]> {
     const creds = this.extractCredentials(config);
     const branch = creds.branch || 'main';
     const maxRuns = creds.maxRuns || 10;
+
+    // Reset diagnostics for this sync.
+    this.lastSyncUnmatchedArtifactNames = [];
+    this.lastSyncRunsWithoutMatchedArtifacts = 0;
+    this.lastSyncCompletedRuns = 0;
+    const seenUnmatchedSet = new Set<string>();
 
     // 1. Fetch recent completed workflow runs.
     // When workflowFile is configured, scope to that workflow + branch + completed.
@@ -100,6 +130,7 @@ export class GitHubConnector implements IQODConnector {
     for (let i = 0; i < runs.length; i++) {
       const run = runs[i];
       if (run.status !== 'completed') continue;
+      this.lastSyncCompletedRuns++;
 
       this.logger.log(`Processing run ${i + 1}/${runs.length}: #${run.run_number} (id: ${run.id})`);
 
@@ -115,30 +146,28 @@ export class GitHubConnector implements IQODConnector {
       const artifacts = await this.fetchArtifactsForRun(creds, run.id);
 
       // 4. Download & parse matching artifacts
-      // Use configured artifactPattern, default to Allure shard pattern, then fall back to common JUnit patterns
       const allResults: AllureResult[] = [];
-      const artifactPattern = creds.artifactPattern;
-      let matchingArtifacts: GitHubArtifact[];
-
-      if (artifactPattern) {
-        // User-configured pattern (supports simple wildcards: * matches any chars)
-        const regex = new RegExp('^' + artifactPattern.replace(/\*/g, '.*') + '$');
-        matchingArtifacts = artifacts.filter((a) => regex.test(a.name) && !a.expired);
-      } else {
-        // Default: try Allure shard artifacts first
-        matchingArtifacts = artifacts.filter(
-          (a) => /^allure-results-shard-\d+$/.test(a.name) && !a.expired,
-        );
-        // Fallback: look for common JUnit/test result artifact names
-        if (matchingArtifacts.length === 0) {
-          matchingArtifacts = artifacts.filter(
-            (a) => /^(test-results|junit-results|test-report|surefire-reports)/.test(a.name) && !a.expired,
-          );
-        }
-      }
+      const matchingArtifacts = this.selectArtifacts(artifacts, creds.artifactPattern);
       const expiredCount = artifacts.filter((a) => a.expired).length;
-      this.logger.log(`  Found ${matchingArtifacts.length} matching artifacts (${artifacts.length} total, ${expiredCount} expired)`);
+      const matchedNames = matchingArtifacts.map((a) => a.name);
+      // Step 1 (Codex precision): per-run diagnostic line distinguishes
+      // "name didn't match" from "name matched but parsed 0 results".
+      this.logger.log(
+        `  Artifacts: ${artifacts.length} total, ${expiredCount} expired, ${matchingArtifacts.length} matched ` +
+        `(matched=[${matchedNames.join(', ')}])`,
+      );
+      if (matchingArtifacts.length === 0 && artifacts.length > 0) {
+        // No defaults / configured pattern matched any non-expired artifact —
+        // surface the seen names so the user can configure `artifactPattern`.
+        const seenNames = artifacts.filter((a) => !a.expired).map((a) => a.name);
+        this.logger.warn(
+          `  No artifact matched the connector's pattern — saw [${seenNames.join(', ')}]. ` +
+          `Configure 'artifactPattern' in connector settings if your repo uses a custom name.`,
+        );
+        for (const n of seenNames) seenUnmatchedSet.add(n);
+      }
 
+      const parsedPerArtifact: Array<{ name: string; parsed: number }> = [];
       for (const artifact of matchingArtifacts) {
         try {
           const results = await this.downloadAndParseAllureArtifact(
@@ -146,9 +175,29 @@ export class GitHubConnector implements IQODConnector {
             artifact.id,
           );
           allResults.push(...results);
+          parsedPerArtifact.push({ name: artifact.name, parsed: results.length });
         } catch (err) {
-          this.logger.warn(`  Failed to download artifact ${artifact.id} (${artifact.name}): ${err instanceof Error ? err.message : err}`);
+          this.logger.warn(
+            `  Failed to download artifact ${artifact.id} (${artifact.name}): ` +
+            `${err instanceof Error ? err.message : err}`,
+          );
+          parsedPerArtifact.push({ name: artifact.name, parsed: 0 });
         }
+      }
+
+      // Step 1: surface "matched-but-empty" specifically — distinct from
+      // the unmatched-name case above.
+      if (matchingArtifacts.length > 0 && allResults.length === 0) {
+        this.logger.warn(
+          `  Matched ${matchingArtifacts.length} artifact(s) but parsed 0 test results: ` +
+          parsedPerArtifact.map((p) => `${p.name}=${p.parsed}`).join(', ') +
+          `. Artifact may contain only an HTML Allure report or a non-default JSON layout.`,
+        );
+      } else if (allResults.length > 0) {
+        this.logger.log(
+          `  Parsed ${allResults.length} test results: ` +
+          parsedPerArtifact.map((p) => `${p.name}=${p.parsed}`).join(', '),
+        );
       }
 
       // 5. Always emit a NormalizedTestRun for each completed workflow run,
@@ -156,14 +205,61 @@ export class GitHubConnector implements IQODConnector {
       // failures, expired artifacts, missing upload step) must still appear in
       // test_runs so Run Health / Daily Run Results / Run History count them.
       if (allResults.length === 0) {
-        this.logger.log(`  No test results parsed — emitting run with empty results (conclusion=${run.conclusion ?? 'null'})`);
-      } else {
-        this.logger.log(`  Parsed ${allResults.length} Allure results`);
+        this.logger.log(`  Emitting run with empty results (conclusion=${run.conclusion ?? 'null'})`);
+        this.lastSyncRunsWithoutMatchedArtifacts++;
       }
       testRuns.push(this.mapAllureToTestRun(run, allResults, relevantJobs));
     }
 
+    this.lastSyncUnmatchedArtifactNames = Array.from(seenUnmatchedSet).sort();
     return testRuns;
+  }
+
+  /**
+   * Pick the matching artifacts in priority order. Returns the FIRST tier that
+   * contains at least one non-expired artifact, so we never accidentally pull
+   * a built `allure-report` when a raw `allure-results-*` artifact is also
+   * present.
+   *
+   * Priority:
+   *   1. User-configured `artifactPattern` (supports `*` wildcards).
+   *   2. Strict raw-Allure shard pattern: `allure-results-shard-N`.
+   *   3. Common Allure naming variants:
+   *        - `allure-results` / `allure-results-N` (non-`shard-` numeric)
+   *        - `allure-results-(merged|combined|all)`
+   *      Limited to that small set so we don't match `allure-report` (HTML).
+   *   4. Common JUnit/test-result artifact names — last resort.
+   */
+  private selectArtifacts(
+    artifacts: GitHubArtifact[],
+    artifactPattern: string | undefined,
+  ): GitHubArtifact[] {
+    const fresh = artifacts.filter((a) => !a.expired);
+
+    if (artifactPattern) {
+      const regex = new RegExp('^' + artifactPattern.replace(/\*/g, '.*') + '$');
+      return fresh.filter((a) => regex.test(a.name));
+    }
+
+    // Tier 2: strict raw shard pattern
+    const tier2 = fresh.filter((a) => /^allure-results-shard-\d+$/.test(a.name));
+    if (tier2.length > 0) return tier2;
+
+    // Tier 3: broader Allure naming variants — bare, indexed, merged. Avoids
+    // `allure-report` (built HTML) and other ad-hoc names.
+    const tier3 = fresh.filter(
+      (a) =>
+        a.name === 'allure-results' ||
+        /^allure-results-\d+$/.test(a.name) ||
+        /^allure-results-(merged|combined|all|raw)$/.test(a.name),
+    );
+    if (tier3.length > 0) return tier3;
+
+    // Tier 4: JUnit / surefire / test-report patterns
+    const tier4 = fresh.filter((a) =>
+      /^(test-results|junit-results|test-report|surefire-reports)/.test(a.name),
+    );
+    return tier4;
   }
 
   // ──────────────── Webhooks ────────────────
@@ -417,6 +513,9 @@ export class GitHubConnector implements IQODConnector {
   }
 
   private extractAllureResults(zip: AdmZip): AllureResult[] {
+    // First try raw Allure: <uuid>-result.json files. This is the primary
+    // path and preserves retry information so within-run FLAKY detection
+    // continues to work.
     const results: AllureResult[] = [];
     for (const entry of zip.getEntries()) {
       if (entry.isDirectory || !entry.entryName.endsWith('-result.json')) continue;
@@ -426,6 +525,70 @@ export class GitHubConnector implements IQODConnector {
         results.push(this.parseAllureResult(parsed));
       } catch (error) {
         this.logger.debug(`Skipping malformed Allure entry ${entry.entryName}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (results.length > 0) return results;
+
+    // Fallback: parse a BUILT Allure 2 report. Some workflows upload only the
+    // generated HTML report (`allure generate` output) which contains
+    // `data/test-cases/<uuid>.json` instead of raw `*-result.json`. Lower
+    // fidelity — the built report already collapses retries, so within-run
+    // FLAKY detection cannot work on this path. Still better than no data.
+    return this.extractBuiltAllureReport(zip);
+  }
+
+  /**
+   * Parse the built-report JSON layout: `data/test-cases/<uuid>.json` files
+   * inside an `allure generate` output. Each file has a different shape
+   * from the raw result — `name`, `status`, `time: { duration }`,
+   * `links: [{type, name, url}]`, `extra: { tags: [...] }` etc.
+   */
+  private extractBuiltAllureReport(zip: AdmZip): AllureResult[] {
+    interface BuiltAllureTestCase {
+      name?: string;
+      fullName?: string;
+      status?: string;
+      time?: { duration?: number };
+      statusMessage?: string;
+      statusTrace?: string;
+      links?: Array<{ name?: string; url?: string; type?: string }>;
+      labels?: Array<{ name: string; value: string }>;
+      extra?: { tags?: string[] };
+    }
+
+    const results: AllureResult[] = [];
+    for (const entry of zip.getEntries()) {
+      if (entry.isDirectory) continue;
+      // Match `data/test-cases/<anything>.json` anywhere inside the zip.
+      // Some generators include a top-level dir prefix like
+      // `allure-report/data/test-cases/...`.
+      if (!/(?:^|\/)data\/test-cases\/[^/]+\.json$/.test(entry.entryName)) continue;
+      try {
+        const content = entry.getData().toString('utf8');
+        const tc = JSON.parse(content) as BuiltAllureTestCase;
+        // Synthesize a raw-shape AllureResultJson so parseAllureResult can
+        // reuse all the TestRailId-extraction logic.
+        const synthLabels = (tc.labels ?? []).slice();
+        for (const t of tc.extra?.tags ?? []) synthLabels.push({ name: 'tag', value: t });
+        const json: AllureResultJson = {
+          name: tc.name ?? '',
+          fullName: tc.fullName,
+          status: tc.status ?? 'unknown',
+          statusDetails: (tc.statusMessage || tc.statusTrace)
+            ? { message: tc.statusMessage, trace: tc.statusTrace }
+            : undefined,
+          labels: synthLabels,
+          links: tc.links,
+          // Synthesize start/stop so durationMs comes through.
+          start: 0,
+          stop: tc.time?.duration ?? 0,
+        };
+        results.push(this.parseAllureResult(json));
+      } catch (error) {
+        this.logger.debug(
+          `Skipping malformed built-report entry ${entry.entryName}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
     return results;
@@ -449,13 +612,6 @@ export class GitHubConnector implements IQODConnector {
     // not normalize to `123`.
     let testRailId: string | undefined;
     let suiteName: string | undefined;
-
-    /** Accepts only purely numeric ID values (≥2 digits). */
-    const setBareNumeric = (raw: string | undefined) => {
-      if (testRailId || !raw) return;
-      const trimmed = raw.trim();
-      if (/^\d{2,}$/.test(trimmed)) testRailId = trimmed;
-    };
 
     /** Accepts a `C`/`CC`/Cyrillic-`С` prefixed token, strips the prefix. */
     const setPrefixed = (raw: string | undefined) => {
@@ -531,8 +687,13 @@ export class GitHubConnector implements IQODConnector {
       }
     }
 
+    // Built Allure reports synthesize start=0 / stop=duration, so a falsy
+    // `start` is valid. Use type-aware checks to compute the difference
+    // when both are numeric.
     const durationMs =
-      json.start && json.stop ? json.stop - json.start : undefined;
+      typeof json.start === 'number' && typeof json.stop === 'number'
+        ? Math.max(json.stop - json.start, 0)
+        : undefined;
 
     return {
       name: json.name,
@@ -650,10 +811,12 @@ export class GitHubConnector implements IQODConnector {
     // expired), fall back to shard/job conclusions so Run History still shows
     // non-zero counts. Each shard or job is treated as one "execution unit".
     // This avoids creating synthetic per-shard test_cases while keeping the
-    // pass-rate column meaningful.
+    // pass-rate column meaningful. The countSource field tells consumers
+    // these are CI-level numbers (shards), not test counts.
     const summaryCounts = mappedResults.length === 0 && shardJobs.length > 0
       ? this.shardJobsToSummaryCounts(shardJobs)
       : undefined;
+    const countSource: NormalizedTestRun['countSource'] = summaryCounts ? 'CI_JOBS' : 'TEST_RESULTS';
 
     return {
       externalId: `gh-${run.id}`,
@@ -666,6 +829,7 @@ export class GitHubConnector implements IQODConnector {
       durationMs,
       status: this.mapTestRunStatus(run.status, run.conclusion),
       results: mappedResults,
+      countSource,
       ...(summaryCounts ? { summaryCounts } : {}),
     };
   }

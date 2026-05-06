@@ -463,6 +463,30 @@ describe('DataService', () => {
       const result = await service.getTestRuns(projectId, {});
       expect(result.items[0].erroredCount).toBe(3);
     });
+
+    it('exposes countSource so the UI can label CI_JOBS rows differently from real test counts', async () => {
+      // Without this, the Run History UI cannot tell shard-fallback runs
+      // (15 shards passed) apart from real per-test runs (15 tests).
+      const run = makeRun('run-cijobs', { countSource: 'CI_JOBS' });
+      prisma.testRun.findMany.mockResolvedValue([run]);
+      prisma.testRun.count.mockResolvedValue(1);
+
+      const result = await service.getTestRuns(projectId, {});
+      expect(result.items[0].countSource).toBe('CI_JOBS');
+    });
+
+    it('defaults countSource to TEST_RESULTS when the column is absent (legacy rows)', async () => {
+      // Pre-migration test_runs rows might be missing countSource entirely.
+      // The API must default them to TEST_RESULTS so the UI does not
+      // suddenly start labelling old per-test runs as shards.
+      const run = makeRun('run-legacy', {});
+      delete (run as any).countSource;
+      prisma.testRun.findMany.mockResolvedValue([run]);
+      prisma.testRun.count.mockResolvedValue(1);
+
+      const result = await service.getTestRuns(projectId, {});
+      expect(result.items[0].countSource).toBe('TEST_RESULTS');
+    });
   });
 
   // ── getTestRunResults ──────────────────────────────────────
@@ -955,6 +979,30 @@ describe('DataService', () => {
       const result = await service.getPassRateTrend(projectId, 30);
 
       expect(result).toHaveLength(5);
+    });
+
+    it('excludes CI_JOBS-source runs from test-total math', async () => {
+      // Shard-fallback runs hold shard counts, not test counts. Including
+      // them in `total`/`passed` would say a "15-shard PASSED workflow"
+      // contributed 15 tests at 100% pass rate, distorting the day's
+      // average whenever a real test-result run had a different rate.
+      const runs = [
+        // Real per-test run: 100 total, 90 passed → 90% pass rate.
+        { startedAt: new Date('2026-03-01T10:00:00Z'), status: 'PASSED', totalTests: 100, passedCount: 90, countSource: 'TEST_RESULTS' },
+        // Shard-fallback run: 15 shards passed — must NOT contribute 15 / 15.
+        { startedAt: new Date('2026-03-01T11:00:00Z'), status: 'PASSED', totalTests: 15, passedCount: 15, countSource: 'CI_JOBS' },
+      ];
+      prisma.testRun.findMany.mockResolvedValue(runs);
+
+      const result = await service.getPassRateTrend(projectId, 30);
+      const day = result.find((r) => r.date === '2026-03-01');
+      expect(day).toBeDefined();
+      expect(day!.totalTests).toBe(100); // CI_JOBS row excluded
+      expect(day!.passRate).toBe(90); // 90/100 → 90% (would be 105/115 = 91.3% if CI_JOBS were included)
+      // Run-level counters keep both rows — Run Health still reflects the
+      // workflow-level pass status of the shard-fallback run.
+      expect(day!.totalRuns).toBe(2);
+      expect(day!.passedRuns).toBe(2);
     });
 
     it('counts ERRORED and CANCELLED runs in failedRuns', async () => {

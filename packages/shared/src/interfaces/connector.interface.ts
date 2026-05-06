@@ -74,6 +74,15 @@ export interface NormalizedTestRun {
     erroredCount?: number;
     flakyCount?: number;
   };
+  /**
+   * Where the run-level counts came from.
+   * - `TEST_RESULTS` (default): counts derive from per-test rows in `results`.
+   * - `CI_JOBS`: counts derive from CI signals (shard/job conclusions); the
+   *   numbers represent shards, not test cases. UI / analytics that display
+   *   "tests" should label these rows differently and exclude them from
+   *   test-total averages.
+   */
+  countSource?: 'TEST_RESULTS' | 'CI_JOBS';
 }
 
 export interface NormalizedTestResult {

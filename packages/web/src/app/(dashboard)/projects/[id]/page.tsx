@@ -486,10 +486,18 @@ export default function ProjectOverviewPage() {
 
                   {/* Row 3: Stats */}
                   <div className="mt-2 ml-11 flex items-center gap-3 text-xs">
-                    <span className="font-medium text-secondary">{run.totalTests} tests</span>
-                    <span className="text-rag-green">{run.passedCount} passed</span>
-                    {(run.failedCount + (run.erroredCount ?? 0)) > 0 && (
-                      <span className="text-rag-red">{run.failedCount + (run.erroredCount ?? 0)} failed</span>
+                    {run.countSource === 'CI_JOBS' ? (
+                      <span className="italic text-muted" title="No per-test data available — counts shown are CI shards/jobs. Configure 'artifactPattern' on the connector.">
+                        {run.totalTests} shard{run.totalTests === 1 ? '' : 's'} (no test data)
+                      </span>
+                    ) : (
+                      <>
+                        <span className="font-medium text-secondary">{run.totalTests} tests</span>
+                        <span className="text-rag-green">{run.passedCount} passed</span>
+                        {(run.failedCount + (run.erroredCount ?? 0)) > 0 && (
+                          <span className="text-rag-red">{run.failedCount + (run.erroredCount ?? 0)} failed</span>
+                        )}
+                      </>
                     )}
                     {run.skippedCount > 0 && (
                       <span className="text-muted">{run.skippedCount} skipped</span>

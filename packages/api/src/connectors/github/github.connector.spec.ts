@@ -427,6 +427,9 @@ describe('GitHubConnector', () => {
         skippedCount: 0,
         erroredCount: 0,
       });
+      // Run is shard-fallback only, so countSource must signal CI_JOBS so
+      // the UI labels it as shards (not test cases).
+      expect(results[0].countSource).toBe('CI_JOBS');
     });
 
     it('falls back to shard counts when shards passed but no Allure artifacts uploaded', async () => {
@@ -551,6 +554,171 @@ describe('GitHubConnector', () => {
       expect(results).toHaveLength(1);
       expect(results[0].status).toBe('PASSED');
       expect(results[0].results).toHaveLength(0);
+    });
+
+    it('falls through to broader Allure name variants (allure-results-N, allure-results-merged) when strict shard pattern misses', async () => {
+      // Repos that upload `allure-results-1` / `allure-results-2` (no
+      // `shard-` infix) or a single merged `allure-results-merged` artifact
+      // were previously dropped, leading to summary-only runs. The broader
+      // tier should pick them up and parse real test data.
+      const run = mockWorkflowRun({ id: 920, run_number: 920, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/920/jobs')
+        .query(true)
+        .reply(200, {
+          jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }],
+        });
+
+      // Two artifacts: a non-`shard-` indexed one and a merged one. The
+      // strict tier 2 (`allure-results-shard-N`) should miss; tier 3 should
+      // accept both.
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/920/artifacts')
+        .query(true)
+        .reply(200, {
+          artifacts: [
+            { id: 9201, name: 'allure-results-1', size_in_bytes: 500, expired: false },
+            { id: 9202, name: 'allure-results-merged', size_in_bytes: 500, expired: false },
+          ],
+        });
+
+      const zip1 = makeAllureResultZip([{ name: 'Login', status: 'passed', testRailId: 'C920' }]);
+      const zip2 = makeAllureResultZip([{ name: 'Logout', status: 'passed', testRailId: 'C921' }]);
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/9201/zip')
+        .reply(200, zip1, { 'Content-Type': 'application/zip' });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/9202/zip')
+        .reply(200, zip2, { 'Content-Type': 'application/zip' });
+
+      const results = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(results).toHaveLength(1);
+      // Both artifacts parsed → 2 test cases linked to TestRail IDs.
+      expect(results[0].results.map((r) => r.testExternalId).sort()).toEqual(['920', '921']);
+      // Real test data, so countSource must be TEST_RESULTS (not CI_JOBS).
+      expect(results[0].countSource).toBe('TEST_RESULTS');
+    });
+
+    it('parses built Allure HTML reports (data/test-cases/*.json) when raw results are absent', async () => {
+      // Some workflows upload only the GENERATED Allure 2 report (the HTML
+      // dashboard). The connector should fall back to parsing that
+      // structure so tests still link by TestRail ID and Run History shows
+      // real per-test counts. Within-run FLAKY detection is lost on this
+      // path (built reports collapse retries) — acceptable trade-off.
+      const run = mockWorkflowRun({ id: 930, run_number: 930, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/930/jobs')
+        .query(true)
+        .reply(200, {
+          jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }],
+        });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/930/artifacts')
+        .query(true)
+        .reply(200, {
+          artifacts: [
+            { id: 9301, name: 'allure-results-merged', size_in_bytes: 500, expired: false },
+          ],
+        });
+
+      // Build a zip that has NO `*-result.json` raw entries — only the
+      // built-report `data/test-cases/<uuid>.json` shape.
+      const zip = new AdmZip();
+      const builtTc = {
+        name: 'Verify accrual activity',
+        fullName: 'tests.AccrualTest.Verify accrual activity',
+        status: 'passed',
+        time: { duration: 12_345 },
+        labels: [{ name: 'tms', value: 'C4570' }],
+      };
+      zip.addFile('allure-report/data/test-cases/abcd-1234.json', Buffer.from(JSON.stringify(builtTc)));
+      const builtTc2 = { name: 'Failing test', status: 'failed', time: { duration: 100 },
+        statusMessage: 'Expected true got false',
+        labels: [{ name: 'tag', value: 'C4571' }] };
+      zip.addFile('allure-report/data/test-cases/efgh-5678.json', Buffer.from(JSON.stringify(builtTc2)));
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/9301/zip')
+        .reply(200, zip.toBuffer(), { 'Content-Type': 'application/zip' });
+
+      const results = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(results).toHaveLength(1);
+      const ids = results[0].results.map((r) => r.testExternalId).sort();
+      expect(ids).toEqual(['4570', '4571']);
+      const passed = results[0].results.find((r) => r.testExternalId === '4570');
+      expect(passed?.status).toBe('PASSED');
+      expect(passed?.durationMs).toBe(12_345);
+      const failed = results[0].results.find((r) => r.testExternalId === '4571');
+      expect(failed?.status).toBe('FAILED');
+      expect(failed?.errorMessage).toBe('Expected true got false');
+      // Built-report data is real per-test data → countSource TEST_RESULTS.
+      expect(results[0].countSource).toBe('TEST_RESULTS');
+    });
+
+    it('exposes diagnostics so SyncService can surface artifact-mismatch warnings', async () => {
+      // Three runs in a row whose artifacts use a non-default name. The
+      // connector should ingest the runs (with shard-fallback counts) AND
+      // report via getDiagnostics() that artifact patterns appear
+      // misconfigured so SyncService can mark the connector with a soft
+      // warning.
+      const runs = [930, 931, 932].map((id) =>
+        mockWorkflowRun({ id, run_number: id, status: 'completed', conclusion: 'success', head_branch: 'develop' }),
+      );
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: runs });
+
+      for (const id of [930, 931, 932]) {
+        nock(GITHUB_API)
+          .get(`/repos/my-org/my-repo/actions/runs/${id}/jobs`)
+          .query(true)
+          .reply(200, {
+            jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 3)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }],
+          });
+        nock(GITHUB_API)
+          .get(`/repos/my-org/my-repo/actions/runs/${id}/artifacts`)
+          .query(true)
+          .reply(200, {
+            artifacts: [
+              // Custom name that doesn't match any default pattern.
+              { id: 100 + id, name: 'custom-e2e-results', size_in_bytes: 500, expired: false },
+            ],
+          });
+      }
+
+      const config = makeConfig({
+        credentials: {
+          token: 'ghp_testtoken123',
+          owner: 'my-org',
+          repo: 'my-repo',
+          workflowFile: 'e2e.yml',
+          branch: 'develop',
+          maxRuns: 3,
+        },
+      });
+      const out = await connector.fetchTestRuns!(config);
+      expect(out).toHaveLength(3);
+      // All three runs fall back to shard counts because nothing matched.
+      for (const r of out) expect(r.countSource).toBe('CI_JOBS');
+
+      const diag = (connector as any).getDiagnostics();
+      expect(diag.completedRuns).toBe(3);
+      expect(diag.runsWithoutMatchedArtifacts).toBe(3);
+      expect(diag.sampleUnmatchedArtifactNames).toContain('custom-e2e-results');
     });
 
     it('maps GitHub conclusion to the correct test-run status', async () => {

@@ -388,6 +388,7 @@ describe('SyncService', () => {
           startedAt: new Date('2026-04-26T10:00:00Z'),
           status: 'PASSED',
           results: [],
+          countSource: 'CI_JOBS',
           summaryCounts: {
             totalTests: 15,
             passedCount: 15,
@@ -408,8 +409,33 @@ describe('SyncService', () => {
       expect(runCall.create.totalTests).toBe(15);
       expect(runCall.create.passedCount).toBe(15);
       expect(runCall.create.failedCount).toBe(0);
+      // countSource persisted so downstream readers can label this row as
+      // shard-level rather than test-level.
+      expect(runCall.create.countSource).toBe('CI_JOBS');
+      expect(runCall.update.countSource).toBe('CI_JOBS');
       // No test_results created because results array is empty
       expect(prisma.testResult.createMany).not.toHaveBeenCalled();
+    });
+
+    it('persists countSource=TEST_RESULTS for normal per-test runs', async () => {
+      // Defensive: when the connector emits real per-test results, the run
+      // row must record TEST_RESULTS so getPassRateTrend's test-total math
+      // includes it (CI_JOBS rows are excluded).
+      const testRuns = sampleTestRuns();
+
+      prisma.testCase.findMany.mockResolvedValue([
+        { id: 'tc-uuid', externalId: 'TC-1', source: SOURCE, automationStatus: 'AUTOMATED' },
+        { id: 'tc-uuid-2', externalId: 'TC-2', source: SOURCE, automationStatus: 'AUTOMATED' },
+      ]);
+      prisma.testRun.upsert.mockResolvedValue({ id: 'run-uuid' });
+      prisma.testResult.createMany.mockResolvedValue({ count: 2 });
+      prisma.testResult.deleteMany.mockResolvedValue({ count: 0 });
+
+      await service.syncTestRuns(PROJECT_ID, CONNECTOR_CONFIG_ID, testRuns, SOURCE);
+
+      const runCall = prisma.testRun.upsert.mock.calls[0][0];
+      expect(runCall.create.countSource).toBe('TEST_RESULTS');
+      expect(runCall.update.countSource).toBe('TEST_RESULTS');
     });
 
     it('ignores summaryCounts when results array is non-empty (per-test data wins)', async () => {

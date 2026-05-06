@@ -194,6 +194,9 @@ export class DataService {
         // (or render it separately).
         erroredCount: run.erroredCount,
         flakyCount: run.flakyCount,
+        // CI_JOBS rows hold shard counts, not test counts — UI labels them
+        // differently and getPassRateTrend excludes them from test totals.
+        countSource: (run as any).countSource ?? 'TEST_RESULTS',
         pipelineRunId: run.pipelineRunId ?? '',
         isRerun: run.isRerun,
         originalRunId: run.originalRunId ?? null,
@@ -537,15 +540,25 @@ export class DataService {
     const runs = await this.prisma.testRun.findMany({
       where: { projectId, startedAt: { gte: since } },
       orderBy: { startedAt: 'asc' },
-      select: { startedAt: true, status: true, totalTests: true, passedCount: true },
+      select: { startedAt: true, status: true, totalTests: true, passedCount: true, countSource: true },
     });
 
     const byDay = new Map<string, { total: number; passed: number; passedRuns: number; failedRuns: number; totalRuns: number }>();
     for (const run of runs) {
       const day = run.startedAt.toISOString().slice(0, 10);
       const entry = byDay.get(day) ?? { total: 0, passed: 0, passedRuns: 0, failedRuns: 0, totalRuns: 0 };
-      entry.total += run.totalTests;
-      entry.passed += run.passedCount;
+      // CI_JOBS rows hold shard counts, not test counts. Including them in
+      // the test-total math would say a "15-shard PASSED workflow" contributed
+      // 15 tests at 100% pass rate to that day's average — distorting the
+      // chart whenever a real test-result-backed run had a different pass
+      // rate. Exclude them from `total`/`passed` (chart numerator/denom)
+      // but keep them in run-level passed/failed counters since those
+      // represent run health, not test counts.
+      const isShardCounts = (run as any).countSource === 'CI_JOBS';
+      if (!isShardCounts) {
+        entry.total += run.totalTests;
+        entry.passed += run.passedCount;
+      }
       entry.totalRuns++;
       if (run.status === 'PASSED') entry.passedRuns++;
       else if (isUnsuccessfulRun(run.status)) entry.failedRuns++;

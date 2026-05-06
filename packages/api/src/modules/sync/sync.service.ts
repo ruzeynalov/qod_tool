@@ -300,16 +300,22 @@ export class SyncService {
         // empty — e.g. GitHub workflow runs without parseable Allure
         // artifacts but with shard/job conclusions. Otherwise compute counts
         // from the actual test_results.
-        const resultCounts = run.results.length === 0 && run.summaryCounts
+        const usingSummary = run.results.length === 0 && !!run.summaryCounts;
+        const resultCounts = usingSummary
           ? {
-              totalTests: run.summaryCounts.totalTests,
-              passedCount: run.summaryCounts.passedCount,
-              failedCount: run.summaryCounts.failedCount,
-              skippedCount: run.summaryCounts.skippedCount ?? 0,
-              erroredCount: run.summaryCounts.erroredCount ?? 0,
-              flakyCount: run.summaryCounts.flakyCount ?? 0,
+              totalTests: run.summaryCounts!.totalTests,
+              passedCount: run.summaryCounts!.passedCount,
+              failedCount: run.summaryCounts!.failedCount,
+              skippedCount: run.summaryCounts!.skippedCount ?? 0,
+              erroredCount: run.summaryCounts!.erroredCount ?? 0,
+              flakyCount: run.summaryCounts!.flakyCount ?? 0,
             }
           : countResultStatuses(run.results);
+        // Default to TEST_RESULTS when neither side flagged the row — the
+        // ConnectorService never relied on shard counts before this PR.
+        const countSource = (run.countSource ?? (usingSummary ? 'CI_JOBS' : 'TEST_RESULTS')) as
+          | 'TEST_RESULTS'
+          | 'CI_JOBS';
 
         const existing = existingRunSet.has(run.externalId);
 
@@ -335,6 +341,7 @@ export class SyncService {
             status: run.status,
             isRerun: run.isRerun ?? false,
             source,
+            countSource: countSource as any,
             ...resultCounts,
           },
           update: {
@@ -348,6 +355,7 @@ export class SyncService {
             durationMs: run.durationMs,
             status: run.status,
             isRerun: run.isRerun ?? false,
+            countSource: countSource as any,
             ...resultCounts,
           },
         });
@@ -918,10 +926,38 @@ export class SyncService {
         addLog(`Fetched ${testCases.length} test cases`);
       }
 
+      let testRunSyncWarning: string | null = null;
       if (connector.fetchTestRuns) {
         addLog(`Fetching test runs from ${connectorType}…`);
         testRuns = await connector.fetchTestRuns(configPayload, since);
         addLog(`Fetched ${testRuns.length} test runs`);
+
+        // Step 5: collect connector-side diagnostics (e.g. GitHub artifact-
+        // name mismatches) and surface them as a soft warning on the
+        // connector status. Hard errors keep using lastSyncError; this is
+        // the "sync ran fine but configuration looks suspect" channel.
+        const diagFn = (connector as { getDiagnostics?: () => unknown }).getDiagnostics;
+        if (typeof diagFn === 'function') {
+          const diag = diagFn.call(connector) as {
+            completedRuns?: number;
+            runsWithoutMatchedArtifacts?: number;
+            sampleUnmatchedArtifactNames?: string[];
+          } | null;
+          if (
+            diag &&
+            (diag.runsWithoutMatchedArtifacts ?? 0) >= 3 &&
+            (diag.completedRuns ?? 0) > 0 &&
+            (diag.sampleUnmatchedArtifactNames?.length ?? 0) > 0
+          ) {
+            const sample = diag.sampleUnmatchedArtifactNames!.slice(0, 5).join(', ');
+            testRunSyncWarning =
+              `${diag.runsWithoutMatchedArtifacts}/${diag.completedRuns} runs uploaded artifacts ` +
+              `that did not match the connector pattern. ` +
+              `Saw [${sample}${diag.sampleUnmatchedArtifactNames!.length > 5 ? ', …' : ''}]. ` +
+              `Configure 'artifactPattern' in connector settings to point at your test-result artifacts.`;
+            addLog(`WARNING: ${testRunSyncWarning}`);
+          }
+        }
       }
 
       if (connector.fetchDefects) {
@@ -1042,6 +1078,9 @@ export class SyncService {
       const updateData: Record<string, any> = {
         status: 'ACTIVE',
         lastSyncError: null,
+        // Persist (or clear) the soft sync warning collected from connector
+        // diagnostics — null means the connector looked healthy this run.
+        lastSyncWarning: testRunSyncWarning,
       };
 
       // Only advance lastSyncAt if we actually fetched data.
