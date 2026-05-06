@@ -854,6 +854,18 @@ export class DataService {
       const denom = Math.max(totalExecutions - 1, 1);
       const flakyRate = Math.min(100, (flakyEvents / denom) * 100);
 
+      // Use the newest of the two flakiness signals so the Flaky Tests list
+      // (sorted by lastFlakyAt desc) surfaces the most recently unstable
+      // tests first. Picking lastFlakyRun unconditionally would backdate the
+      // entry when an older FLAKY row coexists with a newer PASS↔FAIL
+      // transition — that's the mixed case Codex flagged.
+      const candidates = [lastFlakyRun?.startedAt, lastTransitionAt].filter(
+        (d): d is Date => d != null,
+      );
+      const lastFlakyAt = candidates.length > 0
+        ? new Date(Math.max(...candidates.map((d) => d.getTime())))
+        : (runStatuses[0]?.startedAt ?? new Date());
+
       flakyTests.push({
         testCaseId: tc.id,
         testTitle: tc.title,
@@ -861,11 +873,7 @@ export class DataService {
         flakyCount: flakyEvents,
         totalExecutions,
         flakyRate,
-        lastFlakyAt:
-          lastFlakyRun?.startedAt ??
-          lastTransitionAt ??
-          runStatuses[0]?.startedAt ??
-          new Date(),
+        lastFlakyAt,
       });
     }
 

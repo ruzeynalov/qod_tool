@@ -1465,6 +1465,48 @@ describe('DataService', () => {
       expect(result[0].flakyRate).toBe(50);
     });
 
+    it('uses the newest of FLAKY-row vs transition timestamps for lastFlakyAt', async () => {
+      // When a test has both an older FLAKY row and a newer PASS↔FAIL
+      // transition, lastFlakyAt must reflect the newer signal so the Flaky
+      // Tests list (sorted lastFlakyAt desc) does not hide the test behind
+      // genuinely older entries. Picking the FLAKY row unconditionally
+      // backdates the entry, which is what Codex flagged.
+      const oldFlakyDate = new Date(2026, 0, 1, 10, 0, 0);
+      const middlePass = new Date(2026, 1, 1, 10, 0, 0);
+      const recentFail = new Date(2026, 2, 1, 10, 0, 0);
+      const recentPass = new Date(2026, 2, 2, 10, 0, 0);
+
+      mockRuns([
+        { id: 'run-recentPass', startedAt: recentPass },
+        { id: 'run-recentFail', startedAt: recentFail },
+        { id: 'run-middlePass', startedAt: middlePass },
+        { id: 'run-oldFlaky', startedAt: oldFlakyDate },
+      ]);
+
+      prisma.testCase.findMany.mockResolvedValue([
+        {
+          id: 'tc-mixed',
+          title: 'Login mixed signals',
+          suiteName: 'Auth',
+          featureAreaId: 'fa-1',
+          testResults: [
+            { status: 'FLAKY', runId: 'run-oldFlaky' },
+            { status: 'PASSED', runId: 'run-middlePass' },
+            { status: 'FAILED', runId: 'run-recentFail' },
+            { status: 'PASSED', runId: 'run-recentPass' },
+          ],
+        },
+      ]);
+
+      const result = await service.getFlakyTests(projectId);
+
+      expect(result).toHaveLength(1);
+      // The most recent transition (PASSED on recentPass following FAILED on
+      // recentFail) is newer than the OLD FLAKY row — lastFlakyAt should
+      // surface that newer transition timestamp, not the older FLAKY one.
+      expect(result[0].lastFlakyAt.getTime()).toBe(recentPass.getTime());
+    });
+
     it('should default featureAreaId to empty string when null', async () => {
       const dates = Array.from({ length: 5 }, (_, i) => new Date(Date.now() - i * 86400000));
       mockRuns(dates.map((d, i) => ({ id: `run-${i}`, startedAt: d })));
