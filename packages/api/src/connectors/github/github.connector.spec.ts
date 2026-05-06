@@ -432,15 +432,21 @@ describe('GitHubConnector', () => {
     });
 
     it('maps GitHub conclusion to the correct test-run status', async () => {
+      // skipped (path-skipped workflow) and neutral (custom action's
+      // "neither success nor failure") must NOT map to PASSED — that would
+      // inflate getPassRateTrend.passedRuns. They map to CANCELLED so they
+      // count as unhealthy in Run Health and stay out of pass-rate analytics.
       const cancelledRun = mockWorkflowRun({ id: 81, status: 'completed', conclusion: 'cancelled', head_branch: 'develop' });
       const timedOutRun = mockWorkflowRun({ id: 82, status: 'completed', conclusion: 'timed_out', head_branch: 'develop' });
+      const skippedRun = mockWorkflowRun({ id: 83, status: 'completed', conclusion: 'skipped', head_branch: 'develop' });
+      const neutralRun = mockWorkflowRun({ id: 84, status: 'completed', conclusion: 'neutral', head_branch: 'develop' });
 
       nock(GITHUB_API)
         .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
         .query(true)
-        .reply(200, { workflow_runs: [cancelledRun, timedOutRun] });
+        .reply(200, { workflow_runs: [cancelledRun, timedOutRun, skippedRun, neutralRun] });
 
-      for (const id of [81, 82]) {
+      for (const id of [81, 82, 83, 84]) {
         nock(GITHUB_API)
           .get(`/repos/my-org/my-repo/actions/runs/${id}/jobs`)
           .query(true)
@@ -451,10 +457,22 @@ describe('GitHubConnector', () => {
           .reply(200, { artifacts: [] });
       }
 
-      const results = await connector.fetchTestRuns!(makeAllureConfig());
+      const config = makeConfig({
+        credentials: {
+          token: 'ghp_testtoken123',
+          owner: 'my-org',
+          repo: 'my-repo',
+          workflowFile: 'e2e.yml',
+          branch: 'develop',
+          maxRuns: 4,
+        },
+      });
+      const results = await connector.fetchTestRuns!(config);
       const byId = (id: string) => results.find((r) => r.externalId === id);
       expect(byId('gh-81')?.status).toBe('CANCELLED');
       expect(byId('gh-82')?.status).toBe('ERRORED');
+      expect(byId('gh-83')?.status).toBe('CANCELLED');
+      expect(byId('gh-84')?.status).toBe('CANCELLED');
     });
 
     it('downloads all shard artifacts and parses allure results', async () => {

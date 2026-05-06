@@ -595,14 +595,20 @@ export class GitHubConnector implements IQODConnector {
         return 'PASSED';
       case 'cancelled':
         return 'CANCELLED';
+      // `skipped` (path/condition-skipped workflow) and `neutral` (custom
+      // action's "neither success nor failure" outcome) mean tests did NOT
+      // execute. Mapping them to PASSED would inflate pass-rate analytics
+      // — getPassRateTrend.passedRuns increments for any PASSED run. Treat
+      // them as CANCELLED so they appear in Run Health as unhealthy and
+      // stay out of pass-oriented metrics.
+      case 'skipped':
+      case 'neutral':
+        return 'CANCELLED';
       case 'timed_out':
       case 'action_required':
       case 'stale':
       case 'startup_failure':
         return 'ERRORED';
-      case 'skipped':
-      case 'neutral':
-        return 'PASSED';
       case 'failure':
       default:
         return 'FAILED';
