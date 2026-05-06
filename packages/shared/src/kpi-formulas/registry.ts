@@ -121,7 +121,7 @@ export const KPI_FORMULA_DEFINITIONS: Record<KPIMetricKey, FormulaDefinition> = 
     category: 'testing',
     label: 'Flaky Test Rate',
     description:
-      'What percentage of automated tests are flaky? A flaky test flips between PASS and FAIL across recent runs.',
+      'What percentage of automated tests are flaky? A test is flaky when it produces inconsistent outcomes — either by failing then passing across recent runs, or by needing a retry within a single run to pass.',
     formulaText:
       'expression evaluated against {flakyTestCount, automatedTestCount, runCount}',
     direction: 'lower',
@@ -130,7 +130,7 @@ export const KPI_FORMULA_DEFINITIONS: Record<KPIMetricKey, FormulaDefinition> = 
     expressionVariables: ['flakyTestCount', 'automatedTestCount', 'runCount'],
     defaultExpression: '100 * flakyTestCount / automatedTestCount',
     howItWorks:
-      'A test is flagged flaky if it shows at least minTransitions PASS↔FAIL transitions across the runs in the window. Window and minTransitions configure the detection algorithm; the expression then turns the resulting counts into the metric you want.',
+      'A test is flagged flaky if it has at least one FLAKY result row in the window (e.g. a CI run where retries disagreed) OR at least minTransitions PASS↔FAIL transitions across runs. Window and minTransitions configure the cross-run detection; the expression then turns the resulting counts into the metric you want.',
     variables: [
       {
         name: 'windowDays',
