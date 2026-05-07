@@ -57,6 +57,15 @@ interface Connector {
   name: string;
   status: 'active' | 'paused' | 'error';
   lastSyncAt: string | null;
+  /** Hard error from the last sync attempt (e.g. auth failure, GitHub 403). */
+  lastSyncError: string | null;
+  /**
+   * Soft warning surfaced when the connector finished a sync without error
+   * but detected a configuration / data-quality issue (e.g. GitHub artifacts
+   * matched no pattern, or matched but parsed 0 results — typically means
+   * `artifactPattern` needs to be set).
+   */
+  lastSyncWarning: string | null;
   syncSchedule: string;
   syncTimezone: string;
 }
@@ -190,6 +199,8 @@ function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; rea
       name: c.name,
       status: (c.status ?? 'active').toLowerCase() as Connector['status'],
       lastSyncAt: c.lastSyncAt ?? null,
+      lastSyncError: c.lastSyncError ?? null,
+      lastSyncWarning: c.lastSyncWarning ?? null,
       syncSchedule: c.syncSchedule ?? '0 * * * *',
       syncTimezone: c.syncTimezone ?? 'UTC',
     }))
@@ -815,6 +826,21 @@ function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; rea
                       <span>Last sync: {connector.lastSyncAt ? formatRelativeTime(connector.lastSyncAt) : 'Pending'}</span>
                       <span>Schedule: {connector.syncSchedule} ({connector.syncTimezone})</span>
                     </div>
+                    {/* Surface the connector's last-sync error / warning so
+                       users can see configuration issues (e.g. GitHub
+                       artifact pattern mismatch, auth failure) without
+                       having to trawl server logs. Hard errors (red) are
+                       shown above soft warnings (amber). */}
+                    {connector.lastSyncError && (
+                      <div className="mt-2 rounded border border-rag-red/30 bg-rag-red/5 px-2 py-1.5 text-xs text-rag-red">
+                        <span className="font-semibold">Last sync error:</span> {connector.lastSyncError}
+                      </div>
+                    )}
+                    {connector.lastSyncWarning && (
+                      <div className="mt-2 rounded border border-rag-amber/30 bg-rag-amber/5 px-2 py-1.5 text-xs text-rag-amber">
+                        <span className="font-semibold">Configuration warning:</span> {connector.lastSyncWarning}
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-1">
                     {!readOnly && (

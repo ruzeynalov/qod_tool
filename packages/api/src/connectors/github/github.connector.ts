@@ -141,6 +141,17 @@ export class GitHubConnector implements IQODConnector {
     this.lastSyncCompletedRuns = 0;
     const seenUnmatchedSet = new Set<string>();
 
+    // Echo the effective configuration so admins can verify their setup
+    // matches what they expected — especially `artifactPattern`, since a
+    // misconfigured pattern silently filters out every artifact and is the
+    // most common cause of "0 / 0 / 0" or "X shards (no test data)" rows.
+    this.logger.log(
+      `fetchTestRuns config: owner=${creds.owner} repo=${creds.repo} ` +
+      `branch=${branch} maxRuns=${maxRuns} ` +
+      `workflowFile=${creds.workflowFile ?? '<all>'} ` +
+      `artifactPattern=${creds.artifactPattern ?? '<defaults: allure-results-shard-N → allure-results[-N|-merged] → JUnit/playwright/cypress>'}`,
+    );
+
     // 1. Fetch recent completed workflow runs.
     // When workflowFile is configured, scope to that workflow + branch + completed.
     // Otherwise fall back to all workflows for the branch — failed/setup-only runs
@@ -207,21 +218,39 @@ export class GitHubConnector implements IQODConnector {
         }
       }
 
-      const parsedPerArtifact: Array<{ name: string; parsed: number }> = [];
+      const parsedPerArtifact: Array<{ name: string; parsed: number; bytes: number; entries: number }> = [];
       for (const artifact of matchingArtifacts) {
         try {
-          const results = await this.downloadAndParseAllureArtifact(
+          const downloadResult = await this.downloadAndParseAllureArtifact(
             creds,
             artifact.id,
           );
-          allResults.push(...results);
-          parsedPerArtifact.push({ name: artifact.name, parsed: results.length });
+          allResults.push(...downloadResult.results);
+          parsedPerArtifact.push({
+            name: artifact.name,
+            parsed: downloadResult.results.length,
+            bytes: downloadResult.bytes,
+            entries: downloadResult.zipEntries,
+          });
+          // INFO-level visibility: every artifact download. If a customer
+          // sees thousands of test results locally but zero in QOD, this
+          // line in the connector logs immediately tells them whether the
+          // download / unzip / parse step is what's failing.
+          this.logger.log(
+            `  Artifact "${artifact.name}" (${artifact.id}): ` +
+            `downloaded ${(downloadResult.bytes / 1024).toFixed(1)} KB, ` +
+            `${downloadResult.zipEntries} zip entries, ` +
+            `${downloadResult.results.length} test results parsed`,
+          );
         } catch (err) {
-          this.logger.warn(
-            `  Failed to download artifact ${artifact.id} (${artifact.name}): ` +
+          // Promote download failures to ERROR so they're visible in
+          // production logs (most CI/CD log routers default to filtering
+          // WARN+). Include the HTTP status / error message verbatim.
+          this.logger.error(
+            `  FAILED to download artifact ${artifact.id} (${artifact.name}): ` +
             `${err instanceof Error ? err.message : err}`,
           );
-          parsedPerArtifact.push({ name: artifact.name, parsed: 0 });
+          parsedPerArtifact.push({ name: artifact.name, parsed: 0, bytes: 0, entries: 0 });
         }
       }
 
@@ -253,6 +282,21 @@ export class GitHubConnector implements IQODConnector {
     }
 
     this.lastSyncUnmatchedArtifactNames = Array.from(seenUnmatchedSet).sort();
+
+    // INFO-level end-of-sync summary so admins can see whether parsing
+    // worked at all, without sifting per-run lines.
+    const totalParsedResults = testRuns.reduce(
+      (sum, r) => sum + (r.results?.length ?? 0),
+      0,
+    );
+    const summaryFallbackCount = testRuns.filter((r) => r.countSource === 'CI_JOBS').length;
+    this.logger.log(
+      `fetchTestRuns summary: ${this.lastSyncCompletedRuns} completed runs, ` +
+      `${totalParsedResults} test results parsed across all artifacts, ` +
+      `${summaryFallbackCount} runs fell back to shard counts ` +
+      `(unmatched-artifact: ${this.lastSyncRunsWithoutMatchedArtifacts}, ` +
+      `matched-but-empty: ${this.lastSyncRunsWithoutParsedResults})`,
+    );
     return testRuns;
   }
 
@@ -506,7 +550,7 @@ export class GitHubConnector implements IQODConnector {
   private async downloadAndParseAllureArtifact(
     creds: GitHubCredentials,
     artifactId: number,
-  ): Promise<AllureResult[]> {
+  ): Promise<{ results: AllureResult[]; bytes: number; zipEntries: number }> {
     // GitHub returns a 302 redirect to a signed download URL
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GitHubConnector.ARTIFACT_TIMEOUT);
@@ -525,13 +569,20 @@ export class GitHubConnector implements IQODConnector {
       );
 
       if (!response.ok) {
-        throw new Error(`Failed to download artifact ${artifactId}: ${response.status}`);
+        // Include enough context that the user can immediately see what
+        // GitHub returned. Common modes: 401 (token expired/missing),
+        // 403 (token lacks `actions:read` / fine-grained scope), 410
+        // (artifact expired between list and download).
+        throw new Error(
+          `Failed to download artifact ${artifactId}: HTTP ${response.status} ${response.statusText}`,
+        );
       }
 
       const contentLength = parseInt(response.headers.get('content-length') ?? '0', 10);
       const useTempFile = contentLength > GitHubConnector.ARTIFACT_MEM_LIMIT;
 
       let zip: AdmZip;
+      let bytes: number;
 
       if (useTempFile && response.body) {
         // Stream large artifacts to a temp file to avoid OOM
@@ -539,9 +590,11 @@ export class GitHubConnector implements IQODConnector {
         try {
           const nodeStream = Readable.fromWeb(response.body as any);
           await pipeline(nodeStream, fs.createWriteStream(tmpFile));
+          bytes = fs.statSync(tmpFile).size;
           zip = new AdmZip(tmpFile);
+          const entries = zip.getEntries();
           const results = this.extractAllureResults(zip);
-          return results;
+          return { results, bytes, zipEntries: entries.length };
         } finally {
           try { fs.unlinkSync(tmpFile); } catch (e) { this.logger.debug(`Failed to clean up temp file ${tmpFile}: ${e}`); }
         }
@@ -549,8 +602,11 @@ export class GitHubConnector implements IQODConnector {
 
       // Default: process in memory
       const arrayBuffer = await response.arrayBuffer();
+      bytes = arrayBuffer.byteLength;
       zip = new AdmZip(Buffer.from(arrayBuffer));
-      return this.extractAllureResults(zip);
+      const entries = zip.getEntries();
+      const results = this.extractAllureResults(zip);
+      return { results, bytes, zipEntries: entries.length };
     } finally {
       clearTimeout(timer);
     }
