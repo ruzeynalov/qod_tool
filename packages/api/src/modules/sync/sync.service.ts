@@ -947,14 +947,17 @@ export class SyncService {
             runsWithoutMatchedArtifacts?: number;
             runsWithoutParsedResults?: number;
             runsWithDownloadFailures?: number;
+            runsWithExpiredOnlyArtifacts?: number;
             sampleUnmatchedArtifactNames?: string[];
             sampleDownloadErrors?: string[];
+            sampleExpiredArtifactNames?: string[];
           } | null;
           if (diag && (diag.completedRuns ?? 0) > 0) {
             const completed = diag.completedRuns ?? 0;
             const nameMismatchN = diag.runsWithoutMatchedArtifacts ?? 0;
             const parseMissN = diag.runsWithoutParsedResults ?? 0;
             const downloadFailN = diag.runsWithDownloadFailures ?? 0;
+            const expiredOnlyN = diag.runsWithExpiredOnlyArtifacts ?? 0;
             const parts: string[] = [];
 
             // Download-failure warning — actionable via token scope or
@@ -972,6 +975,24 @@ export class SyncService {
                 `. Common causes: token lacks 'actions:read' (fine-grained PAT) or ` +
                 `'repo' scope (classic PAT); artifact expired (>90d, HTTP 410); or ` +
                 `network policy blocking GitHub Releases blob storage.`,
+              );
+            }
+
+            // Expired-only warning — not fixable via artifactPattern. This
+            // often means the configured workflow is stale (for example a
+            // reusable workflow no longer called directly) or artifact
+            // retention is shorter than the sync window.
+            if (expiredOnlyN > 0 && (expiredOnlyN >= 3 || expiredOnlyN === completed)) {
+              const sample = (diag.sampleExpiredArtifactNames ?? []).slice(0, 5).join(', ');
+              const more = (diag.sampleExpiredArtifactNames?.length ?? 0) > 5 ? ', …' : '';
+              parts.push(
+                `${expiredOnlyN}/${completed} runs had artifacts, but every ` +
+                `artifact on those runs was expired` +
+                (sample ? ` (expired examples: [${sample}${more}])` : '') +
+                `. QOD can only show shard/job fallback counts for those runs. ` +
+                `Check whether the selected workflow is stale or no longer the ` +
+                `parent workflow that uploads current artifacts, or increase ` +
+                `GitHub artifact retention / sync sooner.`,
               );
             }
 

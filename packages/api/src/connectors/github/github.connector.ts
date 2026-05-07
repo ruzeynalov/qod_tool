@@ -128,6 +128,14 @@ export class GitHubConnector implements IQODConnector {
   private lastSyncRunsWithDownloadFailures = 0;
   /** Sample of distinct HTTP error messages seen during artifact downloads. */
   private lastSyncDownloadErrorSamples: string[] = [];
+  /**
+   * Number of completed runs where artifacts exist but every artifact is
+   * expired. This is a "selected workflow may be stale / artifacts expired"
+   * signal, not an artifactPattern problem.
+   */
+  private lastSyncRunsWithExpiredOnlyArtifacts = 0;
+  /** Sample of expired artifact names seen during expired-only runs. */
+  private lastSyncExpiredArtifactNames: string[] = [];
   /** Total completed runs processed in the last fetch. */
   private lastSyncCompletedRuns = 0;
 
@@ -137,16 +145,20 @@ export class GitHubConnector implements IQODConnector {
     runsWithoutMatchedArtifacts: number;
     runsWithoutParsedResults: number;
     runsWithDownloadFailures: number;
+    runsWithExpiredOnlyArtifacts: number;
     sampleUnmatchedArtifactNames: string[];
     sampleDownloadErrors: string[];
+    sampleExpiredArtifactNames: string[];
   } {
     return {
       completedRuns: this.lastSyncCompletedRuns,
       runsWithoutMatchedArtifacts: this.lastSyncRunsWithoutMatchedArtifacts,
       runsWithoutParsedResults: this.lastSyncRunsWithoutParsedResults,
       runsWithDownloadFailures: this.lastSyncRunsWithDownloadFailures,
+      runsWithExpiredOnlyArtifacts: this.lastSyncRunsWithExpiredOnlyArtifacts,
       sampleUnmatchedArtifactNames: this.lastSyncUnmatchedArtifactNames.slice(0, 20),
       sampleDownloadErrors: this.lastSyncDownloadErrorSamples.slice(0, 5),
+      sampleExpiredArtifactNames: this.lastSyncExpiredArtifactNames.slice(0, 20),
     };
   }
 
@@ -161,9 +173,12 @@ export class GitHubConnector implements IQODConnector {
     this.lastSyncRunsWithoutParsedResults = 0;
     this.lastSyncRunsWithDownloadFailures = 0;
     this.lastSyncDownloadErrorSamples = [];
+    this.lastSyncRunsWithExpiredOnlyArtifacts = 0;
+    this.lastSyncExpiredArtifactNames = [];
     this.lastSyncCompletedRuns = 0;
     const seenUnmatchedSet = new Set<string>();
     const seenDownloadErrors = new Set<string>();
+    const seenExpiredArtifactNames = new Set<string>();
 
     // Echo the effective configuration so admins can verify their setup
     // matches what they expected — especially `artifactPattern`, since a
@@ -239,11 +254,15 @@ export class GitHubConnector implements IQODConnector {
           for (const n of seenNames) seenUnmatchedSet.add(n);
           this.lastSyncRunsWithoutMatchedArtifacts++;
         } else {
-          // All artifacts on the run were expired — log at debug only since
-          // there's nothing the user can configure to recover them.
+          // All artifacts on the run were expired. This cannot be fixed with
+          // artifactPattern, but it is still useful as a soft warning when it
+          // happens repeatedly: the selected workflow may be stale, or
+          // artifacts may expire before QOD syncs them.
           this.logger.debug(
             `  All ${artifacts.length} artifact(s) on this run were expired; nothing to parse.`,
           );
+          this.lastSyncRunsWithExpiredOnlyArtifacts++;
+          for (const artifact of artifacts) seenExpiredArtifactNames.add(artifact.name);
         }
       }
 
@@ -360,6 +379,7 @@ export class GitHubConnector implements IQODConnector {
 
     this.lastSyncUnmatchedArtifactNames = Array.from(seenUnmatchedSet).sort();
     this.lastSyncDownloadErrorSamples = Array.from(seenDownloadErrors);
+    this.lastSyncExpiredArtifactNames = Array.from(seenExpiredArtifactNames).sort();
 
     // INFO-level end-of-sync summary so admins can see whether parsing
     // worked at all, without sifting per-run lines.
@@ -374,7 +394,8 @@ export class GitHubConnector implements IQODConnector {
       `${summaryFallbackCount} runs fell back to shard counts ` +
       `(unmatched-artifact: ${this.lastSyncRunsWithoutMatchedArtifacts}, ` +
       `matched-but-empty: ${this.lastSyncRunsWithoutParsedResults}, ` +
-      `download-failure: ${this.lastSyncRunsWithDownloadFailures})`,
+      `download-failure: ${this.lastSyncRunsWithDownloadFailures}, ` +
+      `expired-only: ${this.lastSyncRunsWithExpiredOnlyArtifacts})`,
     );
     return testRuns;
   }

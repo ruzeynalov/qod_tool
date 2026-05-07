@@ -726,6 +726,41 @@ describe('SyncService', () => {
       expect(lastCall?.data).not.toHaveProperty('syncCursor');
     });
 
+    it('persists a stale-workflow warning when selected workflow artifacts are expired-only', async () => {
+      const config = makeConnectorConfig();
+      const connector = makeMockConnector({
+        fetchTestRuns: vi.fn().mockResolvedValue([]),
+      }) as IQODConnector & { getDiagnostics: ReturnType<typeof vi.fn> };
+      connector.getDiagnostics = vi.fn().mockReturnValue({
+        completedRuns: 5,
+        runsWithoutMatchedArtifacts: 0,
+        runsWithoutParsedResults: 0,
+        runsWithDownloadFailures: 0,
+        runsWithExpiredOnlyArtifacts: 4,
+        sampleUnmatchedArtifactNames: [],
+        sampleDownloadErrors: [],
+        sampleExpiredArtifactNames: [
+          'allure-results-shard-1',
+          'allure-report-shard-1',
+        ],
+      });
+
+      prisma.connectorConfig.findUniqueOrThrow.mockResolvedValue(config);
+      registry.get.mockReturnValue(connector);
+      prisma.connectorConfig.update.mockResolvedValue({});
+
+      await service.executeSyncJob(CONNECTOR_CONFIG_ID);
+
+      const lastCall = prisma.connectorConfig.update.mock.calls.at(-1)?.[0];
+      expect(lastCall?.data.lastSyncWarning).toContain(
+        '4/5 runs had artifacts, but every artifact on those runs was expired',
+      );
+      expect(lastCall?.data.lastSyncWarning).toContain(
+        'selected workflow is stale',
+      );
+      expect(lastCall?.data.lastSyncWarning).not.toContain('artifactPattern');
+    });
+
     it('should set status to ACTIVE and advance lastSyncAt when data is fetched', async () => {
       const config = makeConnectorConfig();
       const connector = makeMockConnector({

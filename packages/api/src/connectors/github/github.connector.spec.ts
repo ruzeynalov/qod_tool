@@ -952,12 +952,13 @@ describe('GitHubConnector', () => {
       expect(passedCount).toBe(1);
     });
 
-    it('does NOT count expired-only runs against runsWithoutMatchedArtifacts', async () => {
+    it('counts expired-only runs separately from artifact pattern mismatches', async () => {
       // Codex review on `221a67e`: a run whose artifacts are ALL expired
       // hits the same `matchingArtifacts.length === 0` branch as an
       // unmatched-name run, but the user can't fix expired artifacts via
-      // `artifactPattern`. The counter (and thus the SyncService warning)
-      // must skip this case.
+      // `artifactPattern`. Track it separately so SyncService can warn that
+      // the selected workflow may be stale or artifact retention is too
+      // short, without telling the user to change artifactPattern.
       const run = mockWorkflowRun({ id: 952, run_number: 952, status: 'completed', conclusion: 'success', head_branch: 'develop' });
 
       nock(GITHUB_API)
@@ -981,9 +982,15 @@ describe('GitHubConnector', () => {
       await connector.fetchTestRuns!(makeAllureConfig());
       const diag = (connector as any).getDiagnostics();
       expect(diag.completedRuns).toBe(1);
-      // Expired-only runs should not contribute to either counter.
+      // Expired-only runs should not contribute to the pattern/content
+      // counters, but they should have their own actionable diagnostic.
       expect(diag.runsWithoutMatchedArtifacts).toBe(0);
       expect(diag.runsWithoutParsedResults).toBe(0);
+      expect(diag.runsWithExpiredOnlyArtifacts).toBe(1);
+      expect(diag.sampleExpiredArtifactNames).toEqual([
+        'allure-results-shard-1',
+        'allure-results-shard-2',
+      ]);
     });
 
     it('counts artifact-download failures distinctly from matched-but-empty (Codex review)', async () => {
