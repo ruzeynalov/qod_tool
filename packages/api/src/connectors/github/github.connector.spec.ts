@@ -921,6 +921,55 @@ describe('GitHubConnector', () => {
       expect(diag.runsWithoutParsedResults).toBe(0);
     });
 
+    it('counts artifact-download failures distinctly from matched-but-empty (Codex review)', async () => {
+      // Codex review on `5336fc6`: when every matching artifact returns an
+      // HTTP error (auth/scope issue), the previous code caught each
+      // failure per-artifact, allResults stayed empty, and the run was
+      // counted as `runsWithoutParsedResults` ("upload raw Allure" advice)
+      // instead of `runsWithDownloadFailures` ("fix token scope" advice).
+      // The two counters must stay separate so the SyncService warning
+      // can give the right guidance.
+      const run = mockWorkflowRun({
+        id: 4030, run_number: 4030, status: 'completed', conclusion: 'success', head_branch: 'develop',
+      });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/4030/jobs')
+        .query(true)
+        .reply(200, {
+          jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }],
+        });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/4030/artifacts')
+        .query(true)
+        .reply(200, {
+          artifacts: [
+            { id: 40300, name: 'allure-results-shard-1', size_in_bytes: 500, expired: false },
+          ],
+        });
+      // Simulate `actions:read` scope missing → 403 on the zip endpoint.
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/40300/zip')
+        .reply(403, { message: 'Forbidden' });
+
+      await connector.fetchTestRuns!(makeAllureConfig());
+      const diag = (connector as any).getDiagnostics();
+      expect(diag.completedRuns).toBe(1);
+      // Critical assertion: the counter is download-failure, NOT
+      // matched-but-empty. SyncService routes the user to the correct
+      // remediation based on this distinction.
+      expect(diag.runsWithDownloadFailures).toBe(1);
+      expect(diag.runsWithoutParsedResults).toBe(0);
+      expect(diag.runsWithoutMatchedArtifacts).toBe(0);
+      // Sample includes the HTTP status text so the SyncService warning
+      // can quote it back to the user.
+      expect(diag.sampleDownloadErrors.some((s: string) => s.includes('403'))).toBe(true);
+    });
+
     it('keeps name-mismatch and matched-but-empty diagnostics counters separate', async () => {
       // Codex review: previously a single `runsWithoutMatchedArtifacts`
       // counter incremented on BOTH conditions, so the SyncService warning

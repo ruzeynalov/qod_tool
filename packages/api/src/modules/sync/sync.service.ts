@@ -946,13 +946,34 @@ export class SyncService {
             completedRuns?: number;
             runsWithoutMatchedArtifacts?: number;
             runsWithoutParsedResults?: number;
+            runsWithDownloadFailures?: number;
             sampleUnmatchedArtifactNames?: string[];
+            sampleDownloadErrors?: string[];
           } | null;
           if (diag && (diag.completedRuns ?? 0) > 0) {
             const completed = diag.completedRuns ?? 0;
             const nameMismatchN = diag.runsWithoutMatchedArtifacts ?? 0;
             const parseMissN = diag.runsWithoutParsedResults ?? 0;
+            const downloadFailN = diag.runsWithDownloadFailures ?? 0;
             const parts: string[] = [];
+
+            // Download-failure warning — actionable via token scope or
+            // artifact retention. Codex review: this MUST come before /
+            // separately from the matched-but-empty warning, because
+            // pointing the user at "upload raw Allure" when the real
+            // problem is `403 Forbidden` is misleading. We surface this
+            // even when the connector returned without a hard error
+            // because each artifact failure is caught per-artifact.
+            if (downloadFailN >= 1) {
+              const sample = (diag.sampleDownloadErrors ?? []).slice(0, 3).join(' | ');
+              parts.push(
+                `${downloadFailN}/${completed} runs had artifact download failures` +
+                (sample ? ` (e.g. ${sample})` : '') +
+                `. Common causes: token lacks 'actions:read' (fine-grained PAT) or ` +
+                `'repo' scope (classic PAT); artifact expired (>90d, HTTP 410); or ` +
+                `network policy blocking GitHub Releases blob storage.`,
+              );
+            }
 
             // Name-mismatch warning — actionable via `artifactPattern`.
             if (nameMismatchN >= 3 && (diag.sampleUnmatchedArtifactNames?.length ?? 0) > 0) {

@@ -111,6 +111,18 @@ export class GitHubConnector implements IQODConnector {
    * match the connector pattern".
    */
   private lastSyncRunsWithoutParsedResults = 0;
+  /**
+   * Number of completed runs where ≥1 artifact download failed (auth, 404,
+   * 410, network, etc.). Tracked separately from name-mismatch and
+   * matched-but-empty so the user-facing warning can correctly point at
+   * token scope / artifact retention rather than "configure
+   * artifactPattern" or "upload raw Allure". Codex review on `5336fc6`:
+   * if every matching artifact 403s, the previous code treated the run as
+   * matched-but-empty and told the user to upload raw Allure — wrong fix.
+   */
+  private lastSyncRunsWithDownloadFailures = 0;
+  /** Sample of distinct HTTP error messages seen during artifact downloads. */
+  private lastSyncDownloadErrorSamples: string[] = [];
   /** Total completed runs processed in the last fetch. */
   private lastSyncCompletedRuns = 0;
 
@@ -119,13 +131,17 @@ export class GitHubConnector implements IQODConnector {
     completedRuns: number;
     runsWithoutMatchedArtifacts: number;
     runsWithoutParsedResults: number;
+    runsWithDownloadFailures: number;
     sampleUnmatchedArtifactNames: string[];
+    sampleDownloadErrors: string[];
   } {
     return {
       completedRuns: this.lastSyncCompletedRuns,
       runsWithoutMatchedArtifacts: this.lastSyncRunsWithoutMatchedArtifacts,
       runsWithoutParsedResults: this.lastSyncRunsWithoutParsedResults,
+      runsWithDownloadFailures: this.lastSyncRunsWithDownloadFailures,
       sampleUnmatchedArtifactNames: this.lastSyncUnmatchedArtifactNames.slice(0, 20),
+      sampleDownloadErrors: this.lastSyncDownloadErrorSamples.slice(0, 5),
     };
   }
 
@@ -138,8 +154,11 @@ export class GitHubConnector implements IQODConnector {
     this.lastSyncUnmatchedArtifactNames = [];
     this.lastSyncRunsWithoutMatchedArtifacts = 0;
     this.lastSyncRunsWithoutParsedResults = 0;
+    this.lastSyncRunsWithDownloadFailures = 0;
+    this.lastSyncDownloadErrorSamples = [];
     this.lastSyncCompletedRuns = 0;
     const seenUnmatchedSet = new Set<string>();
+    const seenDownloadErrors = new Set<string>();
 
     // Echo the effective configuration so admins can verify their setup
     // matches what they expected — especially `artifactPattern`, since a
@@ -219,6 +238,7 @@ export class GitHubConnector implements IQODConnector {
       }
 
       const parsedPerArtifact: Array<{ name: string; parsed: number; bytes: number; entries: number }> = [];
+      let runHadDownloadFailure = false;
       for (const artifact of matchingArtifacts) {
         try {
           const downloadResult = await this.downloadAndParseAllureArtifact(
@@ -246,18 +266,38 @@ export class GitHubConnector implements IQODConnector {
           // Promote download failures to ERROR so they're visible in
           // production logs (most CI/CD log routers default to filtering
           // WARN+). Include the HTTP status / error message verbatim.
+          const message = err instanceof Error ? err.message : String(err);
           this.logger.error(
-            `  FAILED to download artifact ${artifact.id} (${artifact.name}): ` +
-            `${err instanceof Error ? err.message : err}`,
+            `  FAILED to download artifact ${artifact.id} (${artifact.name}): ${message}`,
           );
           parsedPerArtifact.push({ name: artifact.name, parsed: 0, bytes: 0, entries: 0 });
+          runHadDownloadFailure = true;
+          // Strip artifactId-specific context so identical 401/403/410
+          // failures across many runs collapse into a single sample.
+          const sample = message.replace(/artifact \d+/, 'artifact <id>');
+          seenDownloadErrors.add(sample);
         }
+      }
+      if (runHadDownloadFailure) {
+        // Codex review on `5336fc6`: track this separately from
+        // matched-but-empty so the SyncService warning text can point at
+        // token scope / artifact retention instead of telling the user to
+        // upload raw Allure when the real problem is auth.
+        this.lastSyncRunsWithDownloadFailures++;
       }
 
       // Step 1: surface "matched-but-empty" specifically — distinct from
       // the unmatched-name case above. Increments its own counter so the
       // SyncService warning can be specific about which failure mode.
-      if (matchingArtifacts.length > 0 && allResults.length === 0) {
+      // Codex review: if every download failed (auth/scope/expired), 0
+      // results is the *consequence*, not the cause — `runHadDownloadFailure`
+      // already accounted for that, and incrementing matched-but-empty here
+      // would surface "upload raw Allure" advice instead of the real
+      // "fix token scope" guidance. Only increment when at least one
+      // artifact downloaded successfully but the contents were unparseable.
+      const allMatchingFailed = runHadDownloadFailure &&
+        parsedPerArtifact.every((p) => p.bytes === 0 && p.entries === 0);
+      if (matchingArtifacts.length > 0 && allResults.length === 0 && !allMatchingFailed) {
         this.logger.warn(
           `  Matched ${matchingArtifacts.length} artifact(s) but parsed 0 test results: ` +
           parsedPerArtifact.map((p) => `${p.name}=${p.parsed}`).join(', ') +
@@ -282,6 +322,7 @@ export class GitHubConnector implements IQODConnector {
     }
 
     this.lastSyncUnmatchedArtifactNames = Array.from(seenUnmatchedSet).sort();
+    this.lastSyncDownloadErrorSamples = Array.from(seenDownloadErrors);
 
     // INFO-level end-of-sync summary so admins can see whether parsing
     // worked at all, without sifting per-run lines.
@@ -295,7 +336,8 @@ export class GitHubConnector implements IQODConnector {
       `${totalParsedResults} test results parsed across all artifacts, ` +
       `${summaryFallbackCount} runs fell back to shard counts ` +
       `(unmatched-artifact: ${this.lastSyncRunsWithoutMatchedArtifacts}, ` +
-      `matched-but-empty: ${this.lastSyncRunsWithoutParsedResults})`,
+      `matched-but-empty: ${this.lastSyncRunsWithoutParsedResults}, ` +
+      `download-failure: ${this.lastSyncRunsWithDownloadFailures})`,
     );
     return testRuns;
   }
