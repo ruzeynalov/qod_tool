@@ -176,16 +176,24 @@ export class GitHubConnector implements IQODConnector {
         // No defaults / configured pattern matched any non-expired artifact —
         // surface the seen names so the user can configure `artifactPattern`.
         const seenNames = artifacts.filter((a) => !a.expired).map((a) => a.name);
-        this.logger.warn(
-          `  No artifact matched the connector's pattern — saw [${seenNames.join(', ')}]. ` +
-          `Configure 'artifactPattern' in connector settings if your repo uses a custom name.`,
-        );
-        for (const n of seenNames) seenUnmatchedSet.add(n);
-        // Codex review: only count this run as a name-mismatch when artifact
-        // names actually didn't match. The matched-but-empty case is
-        // counted separately below so the SyncService warning text stays
-        // accurate.
-        this.lastSyncRunsWithoutMatchedArtifacts++;
+        // Codex review: only count this run as a name-mismatch when there
+        // was at least one *non-expired* artifact whose name failed to
+        // match. Expired-only runs cannot be fixed with `artifactPattern`
+        // and would otherwise inflate the connector warning misleadingly.
+        if (seenNames.length > 0) {
+          this.logger.warn(
+            `  No artifact matched the connector's pattern — saw [${seenNames.join(', ')}]. ` +
+            `Configure 'artifactPattern' in connector settings if your repo uses a custom name.`,
+          );
+          for (const n of seenNames) seenUnmatchedSet.add(n);
+          this.lastSyncRunsWithoutMatchedArtifacts++;
+        } else {
+          // All artifacts on the run were expired — log at debug only since
+          // there's nothing the user can configure to recover them.
+          this.logger.debug(
+            `  All ${artifacts.length} artifact(s) on this run were expired; nothing to parse.`,
+          );
+        }
       }
 
       const parsedPerArtifact: Array<{ name: string; parsed: number }> = [];
@@ -567,6 +575,8 @@ export class GitHubConnector implements IQODConnector {
    */
   private extractBuiltAllureReport(zip: AdmZip): AllureResult[] {
     interface BuiltAllureTestCase {
+      uid?: string;
+      historyId?: string;
       name?: string;
       fullName?: string;
       status?: string;
@@ -575,6 +585,7 @@ export class GitHubConnector implements IQODConnector {
       statusTrace?: string;
       links?: Array<{ name?: string; url?: string; type?: string }>;
       labels?: Array<{ name: string; value: string }>;
+      parameters?: Array<{ name?: string; value?: string }>;
       extra?: { tags?: string[] };
     }
 
@@ -593,6 +604,8 @@ export class GitHubConnector implements IQODConnector {
         const synthLabels = (tc.labels ?? []).slice();
         for (const t of tc.extra?.tags ?? []) synthLabels.push({ name: 'tag', value: t });
         const json: AllureResultJson = {
+          uuid: tc.uid,
+          historyId: tc.historyId,
           name: tc.name ?? '',
           fullName: tc.fullName,
           status: tc.status ?? 'unknown',
@@ -601,6 +614,7 @@ export class GitHubConnector implements IQODConnector {
             : undefined,
           labels: synthLabels,
           links: tc.links,
+          parameters: tc.parameters,
           // Synthesize start/stop so durationMs comes through.
           start: 0,
           stop: tc.time?.duration ?? 0,
@@ -717,14 +731,30 @@ export class GitHubConnector implements IQODConnector {
         ? Math.max(json.stop - json.start, 0)
         : undefined;
 
+    // Stable fingerprint of test parameters (data-driven row) — used as
+    // part of the dedup-key fallback when Allure's `historyId` is absent.
+    // We sort by parameter name first so different ordering doesn't change
+    // the fingerprint.
+    const parameters = json.parameters ?? [];
+    const parametersFingerprint = parameters.length === 0
+      ? undefined
+      : parameters
+          .map((p) => `${p.name ?? ''}=${p.value ?? ''}`)
+          .sort()
+          .join('|');
+
     return {
       name: json.name,
+      fullName: json.fullName,
+      historyId: json.historyId,
+      parametersFingerprint,
       status: this.mapAllureStatus(json.status),
       testRailId,
       suiteName,
       durationMs,
       errorMessage: json.statusDetails?.message,
       stackTrace: json.statusDetails?.trace,
+      startedAt: typeof json.start === 'number' ? json.start : undefined,
     };
   }
 
@@ -762,20 +792,55 @@ export class GitHubConnector implements IQODConnector {
     const updatedAt = new Date(run.updated_at);
     const durationMs = updatedAt.getTime() - startedAt.getTime();
 
-    // Group retry attempts by externalId so we can detect within-run flakiness.
-    // A test that flipped between PASSED and FAILED inside the same run is
-    // flaky by definition; squashing it to PASSED (the previous behaviour) hid
-    // the signal entirely from the Flaky Tests widget.
-    const attemptsByExternalId = new Map<string, AllureResult[]>();
+    // Group retry attempts by Allure's `historyId` (or a deterministic
+    // fallback). Allure assigns the same historyId to every attempt of the
+    // *same* test variant (i.e. retries of `methodName` with the same
+    // parameters), but a *different* historyId to each parametrized variant.
+    // The previous key — `testRailId || generateTestId(name, suite)` —
+    // collapsed every parametrized variant of a test method into ONE result
+    // because all variants share the same `@TmsLink` and have identical
+    // `name`. A 2 000-test workflow with 100 methods × 20 parameters
+    // therefore showed up as ~100 results in Run History; this fix keeps
+    // them as 2 000.
+    const dedupKey = (r: AllureResult): string => {
+      if (r.historyId) return `h:${r.historyId}`;
+      // Fallback when Allure data lacks historyId — combine the most
+      // distinguishing fields we have. Real-world Allure always emits
+      // historyId, so this branch is mostly defensive.
+      const variantKey = `${r.fullName ?? r.name}::${r.parametersFingerprint ?? ''}`;
+      // Including testRailId lets us still merge true retries (same name,
+      // same params) when historyId is absent, while different parametrized
+      // variants (different params) stay distinct.
+      return `f:${r.testRailId ?? ''}::${variantKey}`;
+    };
+
+    const attemptsByGroup = new Map<string, AllureResult[]>();
     for (const r of allureResults) {
-      const externalId = r.testRailId || this.generateTestId(r.name, r.suiteName);
-      const list = attemptsByExternalId.get(externalId);
+      const key = dedupKey(r);
+      const list = attemptsByGroup.get(key);
       if (list) list.push(r);
-      else attemptsByExternalId.set(externalId, [r]);
+      else attemptsByGroup.set(key, [r]);
+    }
+    const rawCount = allureResults.length;
+    const dedupedCount = attemptsByGroup.size;
+    if (rawCount > 0) {
+      this.logger.log(
+        `  Deduplication: ${rawCount} raw Allure results → ${dedupedCount} unique tests` +
+          (rawCount > dedupedCount * 2
+            ? ` (${rawCount - dedupedCount} attempts merged as retries)`
+            : ''),
+      );
     }
 
     const mappedResults: NormalizedTestResult[] = [];
-    for (const [externalId, attempts] of attemptsByExternalId.entries()) {
+    for (const [, attemptsUnsorted] of attemptsByGroup.entries()) {
+      // Order attempts by Allure's `start` so retryIndex reflects execution
+      // order (retries can arrive in any zip order).
+      const attempts = [...attemptsUnsorted].sort((a, b) => {
+        const ax = a.startedAt ?? 0;
+        const bx = b.startedAt ?? 0;
+        return ax - bx;
+      });
       const last = attempts[attempts.length - 1];
       const hasPassed = attempts.some((a) => a.status === 'PASSED');
       const hasFailed = attempts.some((a) => a.status === 'FAILED' || a.status === 'ERROR');
@@ -799,8 +864,17 @@ export class GitHubConnector implements IQODConnector {
       );
       const carrier = status === 'PASSED' ? last : (failingAttempt ?? last);
 
+      // testExternalId stays keyed on TestRail ID when available so all
+      // parametrized variants of a TmsLink-tagged method link to the SAME
+      // TestRail test_case (multiple test_results per test_case). When
+      // testRailId is absent, fall back to historyId so each variant gets
+      // its own auto-created github-source test_case rather than collapsing.
+      const testExternalId =
+        carrier.testRailId ||
+        (carrier.historyId ? `gh-history-${carrier.historyId}` : this.generateTestId(carrier.name, carrier.suiteName));
+
       mappedResults.push({
-        testExternalId: externalId,
+        testExternalId,
         testTitle: carrier.name,
         testSuiteName: carrier.suiteName,
         status,
@@ -1094,6 +1168,14 @@ interface GitHubArtifact {
 
 interface AllureResultJson {
   uuid?: string;
+  /**
+   * Allure's stable identity for a test variant: hash of (fullName +
+   * parameters). Same across retries of the same parametrized variant,
+   * different across variants. We use this as the dedup key in
+   * mapAllureToTestRun so 2 000 parametrized invocations of 100 methods
+   * stay 2 000 distinct results instead of collapsing to 100.
+   */
+  historyId?: string;
   name: string;
   fullName?: string;
   status: string;
@@ -1103,16 +1185,23 @@ interface AllureResultJson {
   };
   labels?: Array<{ name: string; value: string }>;
   links?: Array<{ name?: string; url?: string; type?: string }>;
+  /** Test parameters (data-driven row). Used in the dedup-key fallback when historyId is absent. */
+  parameters?: Array<{ name?: string; value?: string }>;
   start?: number;
   stop?: number;
 }
 
 interface AllureResult {
   name: string;
+  fullName?: string;
+  historyId?: string;
+  parametersFingerprint?: string;
   status: 'PASSED' | 'FAILED' | 'SKIPPED' | 'ERROR';
   testRailId?: string;
   suiteName?: string;
   durationMs?: number;
   errorMessage?: string;
   stackTrace?: string;
+  /** Allure's `start` timestamp — used to order retries when computing retryIndex. */
+  startedAt?: number;
 }

@@ -319,21 +319,25 @@ describe('GitHubConnector', () => {
       });
     }
 
-    function makeAllureResultZip(results: Array<{ name: string; status: string; testRailId?: string }>): Buffer {
+    function makeAllureResultZip(
+      results: Array<{ name: string; status: string; testRailId?: string; historyId?: string; parameters?: Array<{ name: string; value: string }>; start?: number; stop?: number }>
+    ): Buffer {
       const zip = new AdmZip();
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
         const json = {
           uuid: `uuid-${i}`,
+          historyId: r.historyId,
           name: r.name,
           status: r.status,
           statusDetails: r.status === 'failed' ? { message: 'Assertion failed', trace: 'at Test.java:42' } : {},
           labels: r.testRailId ? [{ name: 'tag', value: `TestRailId:${r.testRailId}` }] : [],
-          start: 1700000000000,
-          stop: 1700000005000,
+          parameters: r.parameters,
+          start: r.start ?? 1700000000000,
+          stop: r.stop ?? 1700000005000,
         };
         // Simulate real structure: files inside allure-results-merged/
-        zip.addFile(`allure-results-merged/${r.name.replace(/\s/g, '_')}-result.json`, Buffer.from(JSON.stringify(json)));
+        zip.addFile(`allure-results-merged/uuid-${i}-result.json`, Buffer.from(JSON.stringify(json)));
       }
       return zip.toBuffer();
     }
@@ -724,6 +728,145 @@ describe('GitHubConnector', () => {
       expect(diag.sampleUnmatchedArtifactNames).toContain('custom-e2e-results');
     });
 
+    it('preserves parametrized variants as distinct results when they share a TmsLink', async () => {
+      // User-reported regression on PR #16: a workflow with 100 test methods
+      // each tagged @TmsLink("Cxxx") and run with 20 data-driven variants
+      // produced ~100 results in Run History instead of the expected 2 000.
+      // Root cause: the dedup key was `testRailId || generateTestId(name,
+      // suite)`, so all variants of one method (sharing TmsLink AND name)
+      // collapsed into one result. The new dedup uses Allure's `historyId`
+      // — same across true retries of the same variant, different across
+      // parametrized variants — so variants stay distinct while real
+      // retries still merge.
+      const run = mockWorkflowRun({ id: 950, run_number: 950, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/950/jobs')
+        .query(true)
+        .reply(200, { jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/950/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [{ id: 950, name: 'allure-results-shard-1', size_in_bytes: 500, expired: false }] });
+
+      // 5 parametrized invocations of the same test method: same `name`,
+      // same `testRailId` (TmsLink → C9999), distinct `historyId` per
+      // variant (Allure derives historyId from `fullName + parameters`).
+      const shardZip = makeAllureResultZip([
+        { name: 'paymentTest', historyId: 'h-pay-1', status: 'passed', testRailId: 'C9999', parameters: [{ name: 'amount', value: '$10' }] },
+        { name: 'paymentTest', historyId: 'h-pay-2', status: 'passed', testRailId: 'C9999', parameters: [{ name: 'amount', value: '$20' }] },
+        { name: 'paymentTest', historyId: 'h-pay-3', status: 'passed', testRailId: 'C9999', parameters: [{ name: 'amount', value: '$30' }] },
+        { name: 'paymentTest', historyId: 'h-pay-4', status: 'passed', testRailId: 'C9999', parameters: [{ name: 'amount', value: '$40' }] },
+        { name: 'paymentTest', historyId: 'h-pay-5', status: 'failed', testRailId: 'C9999', parameters: [{ name: 'amount', value: '$50' }] },
+      ]);
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/950/zip')
+        .reply(200, shardZip, { 'Content-Type': 'application/zip' });
+
+      const out = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(out).toHaveLength(1);
+      // Five distinct variants → five results (was previously 1 in the
+      // old code because they all shared TmsLink C9999).
+      expect(out[0].results).toHaveLength(5);
+      // testExternalId should still be the TestRail ID for every variant
+      // so they all link to the same TestRail test_case in syncTestRuns.
+      expect(out[0].results.every((r) => r.testExternalId === '9999')).toBe(true);
+      // Statuses preserved per variant.
+      const passed = out[0].results.filter((r) => r.status === 'PASSED');
+      const failed = out[0].results.filter((r) => r.status === 'FAILED');
+      expect(passed).toHaveLength(4);
+      expect(failed).toHaveLength(1);
+    });
+
+    it('falls back to (testRailId, fullName, parameters) when historyId is absent', async () => {
+      // Defensive: real Allure always emits historyId, but when it's missing
+      // (e.g. older Allure version, custom adapter) we should still keep
+      // parametrized variants distinct using fullName + parameters.
+      const run = mockWorkflowRun({ id: 951, run_number: 951, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/951/jobs')
+        .query(true)
+        .reply(200, { jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }] });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/951/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [{ id: 951, name: 'allure-results-shard-1', size_in_bytes: 500, expired: false }] });
+
+      const shardZip = makeAllureZipRaw([
+        { uuid: 'a', name: 'paramTest', fullName: 'pkg.ParamTest.paramTest', status: 'passed',
+          parameters: [{ name: 'value', value: '1' }],
+          labels: [{ name: 'tag', value: 'C100' }],
+          start: 1700000000000, stop: 1700000005000 },
+        { uuid: 'b', name: 'paramTest', fullName: 'pkg.ParamTest.paramTest', status: 'passed',
+          parameters: [{ name: 'value', value: '2' }],
+          labels: [{ name: 'tag', value: 'C100' }],
+          start: 1700000000000, stop: 1700000005000 },
+        // True retry of variant 1 — same fullName + same parameters → group together.
+        { uuid: 'c', name: 'paramTest', fullName: 'pkg.ParamTest.paramTest', status: 'failed',
+          parameters: [{ name: 'value', value: '1' }],
+          labels: [{ name: 'tag', value: 'C100' }],
+          start: 1700000010000, stop: 1700000015000 },
+      ]);
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/951/zip')
+        .reply(200, shardZip, { 'Content-Type': 'application/zip' });
+
+      const out = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(out).toHaveLength(1);
+      // 2 distinct variants. Variant 1 has 2 attempts (passed then failed)
+      // → FLAKY. Variant 2 has 1 passing attempt → PASSED.
+      expect(out[0].results).toHaveLength(2);
+      const flakyCount = out[0].results.filter((r) => r.status === 'FLAKY').length;
+      const passedCount = out[0].results.filter((r) => r.status === 'PASSED').length;
+      expect(flakyCount).toBe(1);
+      expect(passedCount).toBe(1);
+    });
+
+    it('does NOT count expired-only runs against runsWithoutMatchedArtifacts', async () => {
+      // Codex review on `221a67e`: a run whose artifacts are ALL expired
+      // hits the same `matchingArtifacts.length === 0` branch as an
+      // unmatched-name run, but the user can't fix expired artifacts via
+      // `artifactPattern`. The counter (and thus the SyncService warning)
+      // must skip this case.
+      const run = mockWorkflowRun({ id: 952, run_number: 952, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/952/jobs')
+        .query(true)
+        .reply(200, { jobs: [] });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/952/artifacts')
+        .query(true)
+        .reply(200, {
+          artifacts: [
+            { id: 9520, name: 'allure-results-shard-1', size_in_bytes: 500, expired: true },
+            { id: 9521, name: 'allure-results-shard-2', size_in_bytes: 500, expired: true },
+          ],
+        });
+
+      await connector.fetchTestRuns!(makeAllureConfig());
+      const diag = (connector as any).getDiagnostics();
+      expect(diag.completedRuns).toBe(1);
+      // Expired-only runs should not contribute to either counter.
+      expect(diag.runsWithoutMatchedArtifacts).toBe(0);
+      expect(diag.runsWithoutParsedResults).toBe(0);
+    });
+
     it('keeps name-mismatch and matched-but-empty diagnostics counters separate', async () => {
       // Codex review: previously a single `runsWithoutMatchedArtifacts`
       // counter incremented on BOTH conditions, so the SyncService warning
@@ -987,12 +1130,15 @@ describe('GitHubConnector', () => {
           ],
         });
 
-      // Same TestRailId appears twice (retry): first failed, then passed
+      // Real Allure retries: same `historyId` and `name` for each attempt
+      // (Allure 2's @TestCaseId / @AllureRetry mechanism reuses the test
+      // definition across retries). Different `start` times so retryIndex
+      // is stable.
       const shardZip = makeAllureResultZip([
-        { name: 'Loan Test', status: 'failed', testRailId: 'C5001' },
-        { name: 'Loan Test retry', status: 'passed', testRailId: 'C5001' },
-        { name: 'Payment Test', status: 'failed', testRailId: 'C5002' },
-        { name: 'Payment Test retry', status: 'failed', testRailId: 'C5002' },
+        { name: 'Loan Test', historyId: 'h-loan', status: 'failed', testRailId: 'C5001', start: 1700000000000, stop: 1700000005000 },
+        { name: 'Loan Test', historyId: 'h-loan', status: 'passed', testRailId: 'C5001', start: 1700000010000, stop: 1700000015000 },
+        { name: 'Payment Test', historyId: 'h-pay', status: 'failed', testRailId: 'C5002', start: 1700000000000, stop: 1700000005000 },
+        { name: 'Payment Test', historyId: 'h-pay', status: 'failed', testRailId: 'C5002', start: 1700000010000, stop: 1700000015000 },
       ]);
 
       nock(GITHUB_API)
