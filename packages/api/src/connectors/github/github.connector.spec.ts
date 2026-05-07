@@ -728,6 +728,60 @@ describe('GitHubConnector', () => {
       expect(diag.sampleUnmatchedArtifactNames).toContain('custom-e2e-results');
     });
 
+    it('falls back to JUnit XML parsing when artifact has no Allure JSON', async () => {
+      // User-reported: workflows that publish JUnit XML (e.g. surefire,
+      // pytest --junit-xml, gradle test reports) inside an artifact named
+      // `allure-results-shard-N` were producing 0 results because the
+      // connector only looked for `*-result.json`. Adding tier-3 JUnit
+      // XML fallback fixes this without requiring users to reconfigure.
+      const run = mockWorkflowRun({ id: 1010, run_number: 1010, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/1010/jobs')
+        .query(true)
+        .reply(200, { jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }] });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/1010/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [{ id: 1010, name: 'allure-results-shard-1', size_in_bytes: 500, expired: false }] });
+
+      // Zip contains JUnit XML, NOT raw Allure or built-report JSON.
+      const junitXml = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="com.example.LoanTest" tests="3" failures="1" time="2.5">
+    <testcase name="testCreate" classname="com.example.LoanTest" time="0.5"/>
+    <testcase name="testUpdate" classname="com.example.LoanTest" time="1.0">
+      <failure message="Expected 200 got 500"/>
+    </testcase>
+    <testcase name="testDelete" classname="com.example.LoanTest" time="1.0">
+      <skipped/>
+    </testcase>
+  </testsuite>
+</testsuites>`;
+      const zip = new AdmZip();
+      zip.addFile('TEST-com.example.LoanTest.xml', Buffer.from(junitXml));
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/1010/zip')
+        .reply(200, zip.toBuffer(), { 'Content-Type': 'application/zip' });
+
+      const out = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(out).toHaveLength(1);
+      // Three distinct testcases parsed from JUnit XML.
+      expect(out[0].results).toHaveLength(3);
+      const byTitle = (title: string) => out[0].results.find((r) => r.testTitle === title);
+      expect(byTitle('testCreate')?.status).toBe('PASSED');
+      expect(byTitle('testUpdate')?.status).toBe('FAILED');
+      expect(byTitle('testUpdate')?.errorMessage).toBe('Expected 200 got 500');
+      expect(byTitle('testDelete')?.status).toBe('SKIPPED');
+      // Real per-test data was parsed → countSource is TEST_RESULTS, not
+      // shard-fallback CI_JOBS.
+      expect(out[0].countSource).toBe('TEST_RESULTS');
+    });
+
     it('preserves parametrized variants as distinct results when they share a TmsLink', async () => {
       // User-reported regression on PR #16: a workflow with 100 test methods
       // each tagged @TmsLink("Cxxx") and run with 20 data-driven variants

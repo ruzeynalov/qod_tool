@@ -856,7 +856,36 @@ describe('DataService', () => {
       expect(result[1].runId).toBe('run-1');
     });
 
-    it('should deduplicate multiple results for the same run', async () => {
+    it('should aggregate multiple results for the same run by status severity', async () => {
+      // Codex review: when the GitHub connector emits many test_result rows
+      // for one (run, test_case) — the parametrized-variants case, where 20
+      // variants of a TmsLink-tagged method all link to the same TestRail
+      // case — the drawer must show ONE row per run with the worst status.
+      // Previous behaviour ("first encountered wins") was order-dependent
+      // and could swallow a single failed variant in 19 passing ones.
+      const d1 = new Date('2026-03-01');
+      const results = [
+        makeHistoryResult('run-1', d1, { status: 'PASSED' }),
+        makeHistoryResult('run-1', d1, { status: 'FAILED', errorMessage: 'variant 7 failed' }),
+        makeHistoryResult('run-1', d1, { status: 'PASSED' }),
+      ];
+      prisma.testResult.findMany.mockResolvedValue(results);
+
+      const result = await service.getTestCaseHistory(projectId, testCaseId);
+
+      expect(result).toHaveLength(1);
+      // Severity ladder: FAILED beats PASSED so a single failure in many
+      // variants surfaces as the run-level status.
+      expect(result[0].status).toBe('FAILED');
+      expect(result[0].errorMessage).toBe('variant 7 failed');
+      // New aggregate fields expose how many variants ran in this run.
+      expect((result[0] as any).variantsCount).toBe(3);
+      expect((result[0] as any).passedCount).toBe(2);
+      expect((result[0] as any).failedCount).toBe(1);
+    });
+
+    it('aggregates regardless of DB row ordering (severity ladder is stable)', async () => {
+      // Same scenario, opposite arrival order. Result must be the same.
       const d1 = new Date('2026-03-01');
       const results = [
         makeHistoryResult('run-1', d1, { status: 'FAILED' }),
@@ -867,7 +896,7 @@ describe('DataService', () => {
       const result = await service.getTestCaseHistory(projectId, testCaseId);
 
       expect(result).toHaveLength(1);
-      expect(result[0].status).toBe('FAILED'); // first encountered wins
+      expect(result[0].status).toBe('FAILED');
     });
 
     it('should limit to 50 entries', async () => {

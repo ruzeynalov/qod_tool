@@ -5,6 +5,7 @@ import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { Logger } from '@nestjs/common';
 import AdmZip from 'adm-zip';
+import { XMLParser } from 'fast-xml-parser';
 import type {
   IQODConnector,
   ConnectorConfig,
@@ -33,6 +34,16 @@ type PipelineStatus = NormalizedPipelineRun['status'];
 
 export class GitHubConnector implements IQODConnector {
   private readonly logger = new Logger(GitHubConnector.name);
+  /**
+   * Reused parser for tier-3 JUnit/XUnit XML fallback. Configured to keep
+   * attribute names visible (prefixed `@_`) so downstream code can read
+   * `name`, `classname`, `time`, etc. directly without bespoke handling.
+   */
+  private readonly junitXmlParser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@_',
+    textNodeName: '#text',
+  });
   readonly name = 'github';
   readonly type: ConnectorCategory = 'ci';
 
@@ -285,9 +296,12 @@ export class GitHubConnector implements IQODConnector {
     );
     if (tier3.length > 0) return tier3;
 
-    // Tier 4: JUnit / surefire / test-report patterns
+    // Tier 4: JUnit / surefire / test-report / playwright-report patterns.
+    // Slightly broader than before — covers `playwright-report-*`,
+    // `cypress-results`, etc. The actual content is parsed downstream by
+    // tier 1/2/3 of `extractAllureResults`.
     const tier4 = fresh.filter((a) =>
-      /^(test-results|junit-results|test-report|surefire-reports)/.test(a.name),
+      /^(test-results|junit-results|junit|test-report|surefire-reports|playwright-report|cypress-results)/.test(a.name),
     );
     return tier4;
   }
@@ -542,29 +556,190 @@ export class GitHubConnector implements IQODConnector {
     }
   }
 
+  /**
+   * Parse a downloaded artifact zip into per-test results. Tries (in order):
+   *   1. Raw Allure JSON (`*-result.json`) — preserves retry info.
+   *   2. Built Allure 2 HTML report (`data/test-cases/*.json`).
+   *   3. JUnit / XUnit-style XML (`*.xml`) — many workflows publish this
+   *      alongside or instead of Allure. Real-world QOD users have run into
+   *      uniform 0/0/0 results because their artifact contains JUnit XML
+   *      while QOD only knew how to parse Allure JSON.
+   *
+   * Returns the FIRST tier that produces results so we don't double-count
+   * when multiple formats coexist in the same zip (e.g. Allure JSON +
+   * JUnit XML side by side).
+   *
+   * Logs a sample of zip entry names when nothing parses, so the connector
+   * warning + logs let users / admins see what the artifact actually
+   * contains and configure / fix their workflow accordingly.
+   */
   private extractAllureResults(zip: AdmZip): AllureResult[] {
-    // First try raw Allure: <uuid>-result.json files. This is the primary
-    // path and preserves retry information so within-run FLAKY detection
-    // continues to work.
-    const results: AllureResult[] = [];
-    for (const entry of zip.getEntries()) {
+    const entries = zip.getEntries();
+
+    // Tier 1: raw Allure JSON.
+    const allureRaw: AllureResult[] = [];
+    let allureRawCandidates = 0;
+    for (const entry of entries) {
       if (entry.isDirectory || !entry.entryName.endsWith('-result.json')) continue;
+      allureRawCandidates++;
       try {
         const content = entry.getData().toString('utf8');
         const parsed = JSON.parse(content) as AllureResultJson;
-        results.push(this.parseAllureResult(parsed));
+        allureRaw.push(this.parseAllureResult(parsed));
       } catch (error) {
         this.logger.debug(`Skipping malformed Allure entry ${entry.entryName}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (results.length > 0) return results;
+    if (allureRaw.length > 0) return allureRaw;
 
-    // Fallback: parse a BUILT Allure 2 report. Some workflows upload only the
-    // generated HTML report (`allure generate` output) which contains
-    // `data/test-cases/<uuid>.json` instead of raw `*-result.json`. Lower
-    // fidelity — the built report already collapses retries, so within-run
-    // FLAKY detection cannot work on this path. Still better than no data.
-    return this.extractBuiltAllureReport(zip);
+    // Tier 2: built Allure 2 HTML report (`allure generate` output).
+    const builtAllure = this.extractBuiltAllureReport(zip);
+    if (builtAllure.length > 0) return builtAllure;
+
+    // Tier 3: JUnit/XUnit XML. Common in workflows that haven't migrated to
+    // Allure JSON yet, or that publish JUnit XML in addition to Allure
+    // (e.g. via Maven Surefire / pytest --junit-xml / gradle test).
+    const junit = this.extractJUnitXml(zip);
+    if (junit.length > 0) return junit;
+
+    // Diagnostic: when nothing parses, log the zip's top-level structure so
+    // the user can tell whether their artifact contains JUnit / Cucumber /
+    // TestNG / something else and either configure `artifactPattern` or
+    // fix their workflow's upload step. Sampled to avoid log spam on huge
+    // artifacts.
+    const sample = entries
+      .filter((e) => !e.isDirectory)
+      .slice(0, 25)
+      .map((e) => e.entryName);
+    this.logger.warn(
+      `  Artifact has 0 parseable test results. ` +
+      `Tried Allure raw (${allureRawCandidates} *-result.json candidates), ` +
+      `Allure built-report (data/test-cases/*.json), and JUnit XML. ` +
+      `Sample of zip entries: [${sample.join(', ')}]` +
+      (entries.length > sample.length ? ` (… +${entries.length - sample.length} more)` : ''),
+    );
+
+    return [];
+  }
+
+  /**
+   * Tier-3 fallback: parse JUnit/XUnit-style XML test result files.
+   * Looks at any `*.xml` entry and tries to extract `<testcase>` elements
+   * from `<testsuite>` / `<testsuites>` wrappers. Per-test status is derived
+   * from `<failure>` / `<error>` / `<skipped>` children.
+   */
+  private extractJUnitXml(zip: AdmZip): AllureResult[] {
+    const results: AllureResult[] = [];
+    let candidates = 0;
+    for (const entry of zip.getEntries()) {
+      if (entry.isDirectory || !entry.entryName.toLowerCase().endsWith('.xml')) continue;
+      candidates++;
+      try {
+        const xml = entry.getData().toString('utf8');
+        // Cheap pre-check before invoking the full parser — if the file
+        // doesn't even mention testcase, skip without paying parse cost.
+        if (!/\<testcase\b/i.test(xml)) continue;
+        const parsed = this.junitXmlParser.parse(xml);
+        const suites = this.collectJUnitSuites(parsed);
+        for (const suite of suites) {
+          const suiteName = (suite['@_name'] as string | undefined) ?? '';
+          const testcases = this.toArrayUnknown(suite.testcase);
+          for (const tc of testcases) {
+            results.push(this.parseJUnitTestCase(tc as Record<string, unknown>, suiteName));
+          }
+        }
+      } catch (error) {
+        this.logger.debug(
+          `Skipping malformed JUnit XML ${entry.entryName}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (candidates > 0 && results.length === 0) {
+      this.logger.debug(`  Scanned ${candidates} XML file(s) but found no JUnit <testcase> elements.`);
+    }
+    return results;
+  }
+
+  /** Extract testsuite nodes from either <testsuites> or top-level <testsuite>. */
+  private collectJUnitSuites(parsed: Record<string, unknown>): Array<Record<string, unknown>> {
+    const out: Array<Record<string, unknown>> = [];
+    if (parsed.testsuites) {
+      const wrapper = parsed.testsuites as Record<string, unknown>;
+      out.push(...this.toArrayUnknown<Record<string, unknown>>(wrapper.testsuite));
+    }
+    if (parsed.testsuite) {
+      out.push(...this.toArrayUnknown<Record<string, unknown>>(parsed.testsuite));
+    }
+    return out;
+  }
+
+  private parseJUnitTestCase(tc: Record<string, unknown>, suiteName: string): AllureResult {
+    const name = (tc['@_name'] as string) ?? '';
+    const classname = (tc['@_classname'] as string) ?? '';
+    const timeSeconds = parseFloat((tc['@_time'] as string) || '0');
+    const durationMs = Math.round(timeSeconds * 1000);
+
+    let status: AllureResult['status'] = 'PASSED';
+    let errorMessage: string | undefined;
+    let stackTrace: string | undefined;
+    if (tc.failure) {
+      status = 'FAILED';
+      const failure = this.firstOrSelfUnknown(tc.failure);
+      errorMessage = (failure as Record<string, unknown>)['@_message'] as string | undefined;
+      stackTrace = this.extractTextUnknown(failure);
+    } else if (tc.error) {
+      status = 'ERROR';
+      const error = this.firstOrSelfUnknown(tc.error);
+      errorMessage = (error as Record<string, unknown>)['@_message'] as string | undefined;
+      stackTrace = this.extractTextUnknown(error);
+    } else if (tc.skipped !== undefined) {
+      status = 'SKIPPED';
+    }
+
+    // Synthesize an Allure-shape result so the rest of the pipeline (TestRail
+    // extraction, dedup, retry detection) treats JUnit results uniformly.
+    // We pretend each JUnit testcase is its own variant — historyId derived
+    // from (classname, name, time) is stable per execution.
+    const fullName = classname ? `${classname}.${name}` : name;
+    const historyId = `junit:${fullName}:${timeSeconds}`;
+    const synthJson: AllureResultJson = {
+      uuid: undefined,
+      historyId,
+      name,
+      fullName,
+      status: status === 'PASSED' ? 'passed'
+        : status === 'FAILED' ? 'failed'
+        : status === 'ERROR' ? 'broken'
+        : 'skipped',
+      statusDetails: errorMessage || stackTrace ? { message: errorMessage, trace: stackTrace } : undefined,
+      labels: suiteName ? [{ name: 'suite', value: suiteName }] : [],
+    };
+    const r = this.parseAllureResult(synthJson);
+    // Override durationMs since JUnit gives us total time directly (synthJson
+    // had no start/stop).
+    r.durationMs = durationMs > 0 ? durationMs : r.durationMs;
+    // testExternalId fallback handled by mapAllureToTestRun, but we also
+    // surface a class+method id when nothing else identifies the test.
+    return r;
+  }
+
+  private extractTextUnknown(node: unknown): string | undefined {
+    if (typeof node === 'string') return node.trim() || undefined;
+    if (node && typeof node === 'object') {
+      const text = (node as Record<string, unknown>)['#text'];
+      if (typeof text === 'string') return text.trim() || undefined;
+    }
+    return undefined;
+  }
+
+  private firstOrSelfUnknown(value: unknown): unknown {
+    return Array.isArray(value) ? value[0] : value;
+  }
+
+  private toArrayUnknown<T = unknown>(value: unknown): T[] {
+    if (value === undefined || value === null) return [];
+    return Array.isArray(value) ? (value as T[]) : ([value as T]);
   }
 
   /**
@@ -807,7 +982,11 @@ export class GitHubConnector implements IQODConnector {
       // Fallback when Allure data lacks historyId — combine the most
       // distinguishing fields we have. Real-world Allure always emits
       // historyId, so this branch is mostly defensive.
-      const variantKey = `${r.fullName ?? r.name}::${r.parametersFingerprint ?? ''}`;
+      // Codex review: include `suiteName` when `fullName` is missing so two
+      // unrelated tests with the same `name` in different suites don't
+      // collapse to one group under older / custom Allure adapters.
+      const baseName = r.fullName ?? (r.suiteName ? `${r.suiteName}::${r.name}` : r.name);
+      const variantKey = `${baseName}::${r.parametersFingerprint ?? ''}`;
       // Including testRailId lets us still merge true retries (same name,
       // same params) when historyId is absent, while different parametrized
       // variants (different params) stay distinct.

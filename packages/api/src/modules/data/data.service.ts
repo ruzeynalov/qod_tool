@@ -496,38 +496,100 @@ export class DataService {
   // ── Test Case History ───────────────────────────────────────
 
   async getTestCaseHistory(projectId: string, testCaseId: string) {
+    // Fetch enough rows to cover the recent N runs even when a run has many
+    // test_results for the same test case (the GitHub connector now writes
+    // multiple results per (run, test_case) when a TestRail case has
+    // parametrized variants — all variants link to the same test_case).
     const results = await this.prisma.testResult.findMany({
       where: {
         testCaseId,
         run: { projectId },
       },
       orderBy: { run: { startedAt: 'desc' } },
-      take: 200,
+      take: 1000,
       include: {
         run: { select: { name: true, branch: true, environment: true, startedAt: true } },
       },
     });
 
-    // Deduplicate: one result per run (first encountered = latest by startedAt)
-    const byRun = new Map<string, typeof results[0]>();
+    // Aggregate per run: when multiple test_results share (runId, testCaseId)
+    // — the parametrized-variants case — combine them into ONE drawer row
+    // using a status-severity ladder so a single failed variant in a run of
+    // 19 passing variants still shows as FAILED rather than swallowed by
+    // first-encountered-wins ordering.
+    const severity: Record<string, number> = {
+      FAILED: 5,
+      ERROR: 4,
+      FLAKY: 3,
+      SKIPPED: 2,
+      PASSED: 1,
+    };
+    interface Aggregated {
+      runId: string;
+      runStartedAt: Date;
+      runName: string | null;
+      branch: string | null;
+      environment: string | null;
+      status: string;
+      durationMs: number;
+      errorMessage: string | null;
+      variantsCount: number;
+      passedCount: number;
+      failedCount: number;
+    }
+    const byRun = new Map<string, Aggregated>();
     for (const r of results) {
-      if (!byRun.has(r.runId)) {
-        byRun.set(r.runId, r);
+      const existing = byRun.get(r.runId);
+      const isFailing = r.status === 'FAILED' || r.status === 'ERROR';
+      if (!existing) {
+        byRun.set(r.runId, {
+          runId: r.runId,
+          runStartedAt: r.run.startedAt,
+          runName: r.run.name,
+          branch: r.run.branch,
+          environment: r.run.environment,
+          status: r.status,
+          durationMs: r.durationMs ?? 0,
+          errorMessage: r.errorMessage,
+          variantsCount: 1,
+          passedCount: r.status === 'PASSED' ? 1 : 0,
+          failedCount: isFailing ? 1 : 0,
+        });
+        continue;
+      }
+      existing.variantsCount++;
+      if (r.status === 'PASSED') existing.passedCount++;
+      if (isFailing) existing.failedCount++;
+      // Pick the more severe status so a 1-failed-19-passed run still
+      // surfaces as FAILED in the drawer.
+      const newSev = severity[r.status] ?? 0;
+      const oldSev = severity[existing.status] ?? 0;
+      if (newSev > oldSev) {
+        existing.status = r.status;
+        existing.errorMessage = r.errorMessage ?? existing.errorMessage;
+        existing.durationMs = r.durationMs ?? existing.durationMs;
       }
     }
 
     return Array.from(byRun.values())
-      .sort((a, b) => new Date(b.run.startedAt).getTime() - new Date(a.run.startedAt).getTime())
+      .sort((a, b) => b.runStartedAt.getTime() - a.runStartedAt.getTime())
       .slice(0, 50)
-      .map((r) => ({
-        runId: r.runId,
-        runName: r.run.name ?? '',
-        date: r.run.startedAt,
-        status: r.status,
-        durationMs: r.durationMs ?? 0,
-        errorMessage: r.errorMessage ?? undefined,
-        branch: r.run.branch ?? '',
-        environment: r.run.environment ?? '',
+      .map((agg) => ({
+        runId: agg.runId,
+        runName: agg.runName ?? '',
+        date: agg.runStartedAt,
+        status: agg.status,
+        durationMs: agg.durationMs,
+        errorMessage: agg.errorMessage ?? undefined,
+        branch: agg.branch ?? '',
+        environment: agg.environment ?? '',
+        // New fields (Codex review): expose how many variants of this test
+        // case ran in the same run and how many passed/failed. The existing
+        // drawer can ignore these without breaking; new UI can show
+        // "13/15 passed" style summaries.
+        variantsCount: agg.variantsCount,
+        passedCount: agg.passedCount,
+        failedCount: agg.failedCount,
       }));
   }
 
