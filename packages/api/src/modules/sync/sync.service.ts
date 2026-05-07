@@ -990,9 +990,9 @@ export class SyncService {
             if (parseMissN >= 3) {
               parts.push(
                 `${parseMissN}/${completed} runs had matching artifacts that parsed 0 ` +
-                `test results — likely an HTML-only Allure report or a non-default ` +
-                `JSON layout. Upload raw 'allure-results' (the *-result.json files) ` +
-                `from your workflow.`,
+                `test results — likely a malformed file or an unsupported report ` +
+                `layout. Upload raw 'allure-results' (the *-result.json files) or ` +
+                `a generated Allure report with data/test-cases/*.json.`,
               );
             }
 

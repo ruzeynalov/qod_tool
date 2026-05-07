@@ -634,7 +634,7 @@ describe('GitHubConnector', () => {
         .query(true)
         .reply(200, {
           artifacts: [
-            { id: 9301, name: 'allure-results-merged', size_in_bytes: 500, expired: false },
+            { id: 9301, name: 'allure-report-shard-13.zip', size_in_bytes: 500, expired: false },
           ],
         });
 
@@ -669,6 +669,71 @@ describe('GitHubConnector', () => {
       expect(failed?.errorMessage).toBe('Expected true got false');
       // Built-report data is real per-test data → countSource TEST_RESULTS.
       expect(results[0].countSource).toBe('TEST_RESULTS');
+    });
+
+    it('falls back to built Allure report artifacts when raw Allure artifacts parse zero results', async () => {
+      // The Fineract workflow uploads both `allure-results-shard-N` and
+      // `allure-report-shard-N.zip`. If the raw-results artifact is empty,
+      // malformed, unavailable, or otherwise unparseable, the connector must
+      // try the built report before falling back to misleading shard counts.
+      const run = mockWorkflowRun({ id: 931, run_number: 931, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/931/jobs')
+        .query(true)
+        .reply(200, {
+          jobs: [{ id: 1, name: 'E2E Tests (Shard 13 of 15)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }],
+        });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/931/artifacts')
+        .query(true)
+        .reply(200, {
+          artifacts: [
+            { id: 9311, name: 'allure-results-shard-13', size_in_bytes: 500, expired: false },
+            { id: 9312, name: 'allure-report-shard-13.zip', size_in_bytes: 500, expired: false },
+          ],
+        });
+
+      const emptyRawZip = new AdmZip();
+      emptyRawZip.addFile('README.txt', Buffer.from('raw upload missing result json'));
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/9311/zip')
+        .reply(200, emptyRawZip.toBuffer(), { 'Content-Type': 'application/zip' });
+
+      const builtZip = new AdmZip();
+      builtZip.addFile(
+        'data/test-cases/case-76629.json',
+        Buffer.from(JSON.stringify({
+          name: 'Validate loan repayment schedule',
+          fullName: 'org.apache.fineract.e2e.Loans.Validate loan repayment schedule',
+          status: 'passed',
+          time: { duration: 51_000 },
+          labels: [{ name: 'tag', value: 'TestRailId:C76629' }],
+          extra: { tags: ['TestRailId:C76629'] },
+        })),
+      );
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/9312/zip')
+        .reply(200, builtZip.toBuffer(), { 'Content-Type': 'application/zip' });
+
+      const results = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(results).toHaveLength(1);
+      expect(results[0].countSource).toBe('TEST_RESULTS');
+      expect(results[0].summaryCounts).toBeUndefined();
+      expect(results[0].results).toHaveLength(1);
+      expect(results[0].results[0].testExternalId).toBe('76629');
+      expect(results[0].results[0].status).toBe('PASSED');
+
+      const diag = (connector as any).getDiagnostics();
+      expect(diag.runsWithoutParsedResults).toBe(0);
+      expect(diag.runsWithoutMatchedArtifacts).toBe(0);
+      expect(diag.runsWithDownloadFailures).toBe(0);
     });
 
     it('exposes diagnostics so SyncService can surface artifact-mismatch warnings', async () => {

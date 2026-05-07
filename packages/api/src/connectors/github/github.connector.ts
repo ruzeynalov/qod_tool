@@ -32,6 +32,11 @@ interface GitHubCredentials {
 
 type PipelineStatus = NormalizedPipelineRun['status'];
 
+interface ArtifactSelectionTier {
+  label: string;
+  artifacts: GitHubArtifact[];
+}
+
 export class GitHubConnector implements IQODConnector {
   private readonly logger = new Logger(GitHubConnector.name);
   /**
@@ -103,8 +108,8 @@ export class GitHubConnector implements IQODConnector {
   private lastSyncRunsWithoutMatchedArtifacts = 0;
   /**
    * Number of completed runs whose artifacts MATCHED a pattern but parsed
-   * zero test results — typically an HTML-only Allure report, a malformed
-   * JSON, or a non-default JSON layout. This is the "fix the workflow's
+   * zero test results — typically a malformed file or an unsupported report
+   * layout. This is the "fix the workflow's
    * artifact contents" signal, distinct from the name-mismatch above.
    * Codex review: previously these two cases were collapsed into a single
    * counter that the SyncService warning then mislabelled as "did not
@@ -168,7 +173,7 @@ export class GitHubConnector implements IQODConnector {
       `fetchTestRuns config: owner=${creds.owner} repo=${creds.repo} ` +
       `branch=${branch} maxRuns=${maxRuns} ` +
       `workflowFile=${creds.workflowFile ?? '<all>'} ` +
-      `artifactPattern=${creds.artifactPattern ?? '<defaults: allure-results-shard-N → allure-results[-N|-merged] → JUnit/playwright/cypress>'}`,
+      `artifactPattern=${creds.artifactPattern ?? '<defaults: allure-results-shard-N → allure-results[-N|-merged] → allure-report-shard-N → JUnit/playwright/cypress>'}`,
     );
 
     // 1. Fetch recent completed workflow runs.
@@ -204,16 +209,21 @@ export class GitHubConnector implements IQODConnector {
 
       // 4. Download & parse matching artifacts
       const allResults: AllureResult[] = [];
-      const matchingArtifacts = this.selectArtifacts(artifacts, creds.artifactPattern);
+      const artifactTiers = this.selectArtifactTiers(artifacts, creds.artifactPattern);
       const expiredCount = artifacts.filter((a) => a.expired).length;
-      const matchedNames = matchingArtifacts.map((a) => a.name);
+      const matchedNames = Array.from(new Set(artifactTiers.flatMap((tier) => tier.artifacts.map((a) => a.name))));
+      const tierSummary = artifactTiers.length > 0
+        ? artifactTiers
+          .map((tier) => `${tier.label}=[${tier.artifacts.map((a) => a.name).join(', ')}]`)
+          .join('; ')
+        : 'none';
       // Step 1 (Codex precision): per-run diagnostic line distinguishes
       // "name didn't match" from "name matched but parsed 0 results".
       this.logger.log(
-        `  Artifacts: ${artifacts.length} total, ${expiredCount} expired, ${matchingArtifacts.length} matched ` +
-        `(matched=[${matchedNames.join(', ')}])`,
+        `  Artifacts: ${artifacts.length} total, ${expiredCount} expired, ${matchedNames.length} matched ` +
+        `(tiers: ${tierSummary})`,
       );
-      if (matchingArtifacts.length === 0 && artifacts.length > 0) {
+      if (artifactTiers.length === 0 && artifacts.length > 0) {
         // No defaults / configured pattern matched any non-expired artifact —
         // surface the seen names so the user can configure `artifactPattern`.
         const seenNames = artifacts.filter((a) => !a.expired).map((a) => a.name);
@@ -239,46 +249,72 @@ export class GitHubConnector implements IQODConnector {
 
       const parsedPerArtifact: Array<{ name: string; parsed: number; bytes: number; entries: number }> = [];
       let runHadDownloadFailure = false;
-      for (const artifact of matchingArtifacts) {
-        try {
-          const downloadResult = await this.downloadAndParseAllureArtifact(
-            creds,
-            artifact.id,
-          );
-          allResults.push(...downloadResult.results);
-          parsedPerArtifact.push({
-            name: artifact.name,
-            parsed: downloadResult.results.length,
-            bytes: downloadResult.bytes,
-            entries: downloadResult.zipEntries,
-          });
-          // INFO-level visibility: every artifact download. If a customer
-          // sees thousands of test results locally but zero in QOD, this
-          // line in the connector logs immediately tells them whether the
-          // download / unzip / parse step is what's failing.
-          this.logger.log(
-            `  Artifact "${artifact.name}" (${artifact.id}): ` +
-            `downloaded ${(downloadResult.bytes / 1024).toFixed(1)} KB, ` +
-            `${downloadResult.zipEntries} zip entries, ` +
-            `${downloadResult.results.length} test results parsed`,
-          );
-        } catch (err) {
-          // Promote download failures to ERROR so they're visible in
-          // production logs (most CI/CD log routers default to filtering
-          // WARN+). Include the HTTP status / error message verbatim.
-          const message = err instanceof Error ? err.message : String(err);
-          this.logger.error(
-            `  FAILED to download artifact ${artifact.id} (${artifact.name}): ${message}`,
-          );
-          parsedPerArtifact.push({ name: artifact.name, parsed: 0, bytes: 0, entries: 0 });
-          runHadDownloadFailure = true;
-          // Strip artifactId-specific context so identical 401/403/410
-          // failures across many runs collapse into a single sample.
-          const sample = message.replace(/artifact \d+/, 'artifact <id>');
-          seenDownloadErrors.add(sample);
+      let selectedTierLabel: string | null = null;
+      const attemptedArtifactIds = new Set<number>();
+      for (const tier of artifactTiers) {
+        const tierArtifacts = tier.artifacts.filter((artifact) => !attemptedArtifactIds.has(artifact.id));
+        if (tierArtifacts.length === 0) continue;
+
+        const tierResults: AllureResult[] = [];
+        const tierParsed: Array<{ name: string; parsed: number; bytes: number; entries: number }> = [];
+        this.logger.log(
+          `  Trying artifact tier "${tier.label}" with ${tierArtifacts.length} artifact(s): ` +
+          `[${tierArtifacts.map((a) => a.name).join(', ')}]`,
+        );
+
+        for (const artifact of tierArtifacts) {
+          attemptedArtifactIds.add(artifact.id);
+          try {
+            const downloadResult = await this.downloadAndParseAllureArtifact(
+              creds,
+              artifact.id,
+            );
+            tierResults.push(...downloadResult.results);
+            tierParsed.push({
+              name: artifact.name,
+              parsed: downloadResult.results.length,
+              bytes: downloadResult.bytes,
+              entries: downloadResult.zipEntries,
+            });
+            // INFO-level visibility: every artifact download. If a customer
+            // sees thousands of test results locally but zero in QOD, this
+            // line in the connector logs immediately tells them whether the
+            // download / unzip / parse step is what's failing.
+            this.logger.log(
+              `  Artifact "${artifact.name}" (${artifact.id}): ` +
+              `downloaded ${(downloadResult.bytes / 1024).toFixed(1)} KB, ` +
+              `${downloadResult.zipEntries} zip entries, ` +
+              `${downloadResult.results.length} test results parsed`,
+            );
+          } catch (err) {
+            // Promote download failures to ERROR so they're visible in
+            // production logs (most CI/CD log routers default to filtering
+            // WARN+). Include the HTTP status / error message verbatim.
+            const message = err instanceof Error ? err.message : String(err);
+            this.logger.error(
+              `  FAILED to download artifact ${artifact.id} (${artifact.name}): ${message}`,
+            );
+            tierParsed.push({ name: artifact.name, parsed: 0, bytes: 0, entries: 0 });
+            runHadDownloadFailure = true;
+            // Strip artifactId-specific context so identical 401/403/410
+            // failures across many runs collapse into a single sample.
+            const sample = message.replace(/artifact \d+/, 'artifact <id>');
+            seenDownloadErrors.add(sample);
+          }
         }
+
+        parsedPerArtifact.push(...tierParsed);
+        if (tierResults.length > 0) {
+          allResults.push(...tierResults);
+          selectedTierLabel = tier.label;
+          break;
+        }
+
+        this.logger.warn(
+          `  Artifact tier "${tier.label}" parsed 0 test results; trying next tier if available.`,
+        );
       }
-      if (runHadDownloadFailure) {
+      if (runHadDownloadFailure && allResults.length === 0) {
         // Codex review on `5336fc6`: track this separately from
         // matched-but-empty so the SyncService warning text can point at
         // token scope / artifact retention instead of telling the user to
@@ -297,16 +333,17 @@ export class GitHubConnector implements IQODConnector {
       // artifact downloaded successfully but the contents were unparseable.
       const allMatchingFailed = runHadDownloadFailure &&
         parsedPerArtifact.every((p) => p.bytes === 0 && p.entries === 0);
-      if (matchingArtifacts.length > 0 && allResults.length === 0 && !allMatchingFailed) {
+      if (artifactTiers.length > 0 && allResults.length === 0 && !allMatchingFailed) {
         this.logger.warn(
-          `  Matched ${matchingArtifacts.length} artifact(s) but parsed 0 test results: ` +
+          `  Matched ${matchedNames.length} artifact(s) but parsed 0 test results: ` +
           parsedPerArtifact.map((p) => `${p.name}=${p.parsed}`).join(', ') +
-          `. Artifact may contain only an HTML Allure report or a non-default JSON layout.`,
+          `. Artifact may contain a malformed file or an unsupported report layout.`,
         );
         this.lastSyncRunsWithoutParsedResults++;
       } else if (allResults.length > 0) {
         this.logger.log(
-          `  Parsed ${allResults.length} test results: ` +
+          `  Parsed ${allResults.length} test results` +
+          `${selectedTierLabel ? ` from tier "${selectedTierLabel}"` : ''}: ` +
           parsedPerArtifact.map((p) => `${p.name}=${p.parsed}`).join(', '),
         );
       }
@@ -343,10 +380,10 @@ export class GitHubConnector implements IQODConnector {
   }
 
   /**
-   * Pick the matching artifacts in priority order. Returns the FIRST tier that
-   * contains at least one non-expired artifact, so we never accidentally pull
-   * a built `allure-report` when a raw `allure-results-*` artifact is also
-   * present.
+   * Pick matching artifacts in priority order. The fetch loop tries each tier
+   * until one parses real results. That keeps raw Allure preferred while still
+   * letting generated `allure-report-*` artifacts recover when raw artifacts
+   * are absent, empty, expired, or unavailable.
    *
    * Priority:
    *   1. User-configured `artifactPattern` (supports `*` wildcards).
@@ -355,41 +392,67 @@ export class GitHubConnector implements IQODConnector {
    *        - `allure-results` / `allure-results-N` (non-`shard-` numeric)
    *        - `allure-results-(merged|combined|all)`
    *      Limited to that small set so we don't match `allure-report` (HTML).
-   *   4. Common JUnit/test-result artifact names — last resort.
+   *   4. Built Allure report names: `allure-report-shard-N`.
+   *   5. Common JUnit/test-result artifact names — last resort.
    */
-  private selectArtifacts(
+  private selectArtifactTiers(
     artifacts: GitHubArtifact[],
     artifactPattern: string | undefined,
-  ): GitHubArtifact[] {
+  ): ArtifactSelectionTier[] {
     const fresh = artifacts.filter((a) => !a.expired);
+    const tiers: ArtifactSelectionTier[] = [];
 
     if (artifactPattern) {
       const regex = new RegExp('^' + artifactPattern.replace(/\*/g, '.*') + '$');
-      return fresh.filter((a) => regex.test(a.name));
+      const configured = fresh.filter((a) => regex.test(a.name));
+      if (configured.length > 0) {
+        tiers.push({ label: 'configured-pattern', artifacts: configured });
+      }
     }
 
     // Tier 2: strict raw shard pattern
-    const tier2 = fresh.filter((a) => /^allure-results-shard-\d+$/.test(a.name));
-    if (tier2.length > 0) return tier2;
+    const tier2 = fresh.filter((a) => /^allure-results-shard-\d+(?:\.zip)?$/.test(a.name));
+    if (tier2.length > 0) {
+      tiers.push({ label: 'raw-allure-shards', artifacts: tier2 });
+    }
 
     // Tier 3: broader Allure naming variants — bare, indexed, merged. Avoids
     // `allure-report` (built HTML) and other ad-hoc names.
     const tier3 = fresh.filter(
       (a) =>
         a.name === 'allure-results' ||
-        /^allure-results-\d+$/.test(a.name) ||
-        /^allure-results-(merged|combined|all|raw)$/.test(a.name),
+        /^allure-results-\d+(?:\.zip)?$/.test(a.name) ||
+        /^allure-results-(merged|combined|all|raw)(?:\.zip)?$/.test(a.name),
     );
-    if (tier3.length > 0) return tier3;
+    if (tier3.length > 0) {
+      tiers.push({ label: 'raw-allure-variants', artifacts: tier3 });
+    }
 
-    // Tier 4: JUnit / surefire / test-report / playwright-report patterns.
+    // Tier 4: generated Allure 2 HTML report artifacts. These usually
+    // contain `data/test-cases/*.json`; parse them only after raw results
+    // fail because built reports collapse retry attempts.
+    const tier4 = fresh.filter(
+      (a) =>
+        a.name === 'allure-report' ||
+        /^allure-report-(?:shard-)?\d+(?:\.zip)?$/.test(a.name) ||
+        /^allure-report-(merged|combined|all)(?:\.zip)?$/.test(a.name),
+    );
+    if (tier4.length > 0) {
+      tiers.push({ label: 'built-allure-reports', artifacts: tier4 });
+    }
+
+    // Tier 5: JUnit / surefire / test-report / playwright-report patterns.
     // Slightly broader than before — covers `playwright-report-*`,
     // `cypress-results`, etc. The actual content is parsed downstream by
     // tier 1/2/3 of `extractAllureResults`.
-    const tier4 = fresh.filter((a) =>
+    const tier5 = fresh.filter((a) =>
       /^(test-results|junit-results|junit|test-report|surefire-reports|playwright-report|cypress-results)/.test(a.name),
     );
-    return tier4;
+    if (tier5.length > 0) {
+      tiers.push({ label: 'generic-test-reports', artifacts: tier5 });
+    }
+
+    return tiers;
   }
 
   // ──────────────── Webhooks ────────────────
