@@ -75,6 +75,26 @@ describe('GitHubConnector', () => {
     expect(connector.type).toBe('ci');
   });
 
+  it('bounds internal concurrent artifact work', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+
+    const result = await (connector as any).mapWithConcurrency(
+      [1, 2, 3, 4, 5],
+      2,
+      async (value: number) => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight--;
+        return value * 2;
+      },
+    );
+
+    expect(result).toEqual([2, 4, 6, 8, 10]);
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+  });
+
   // ──────────────── authenticate ────────────────
 
   describe('authenticate', () => {

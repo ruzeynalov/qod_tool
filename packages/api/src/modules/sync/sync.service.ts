@@ -30,6 +30,8 @@ interface SyncCounts {
   errors: SyncError[];
 }
 
+const TEST_RESULT_CREATE_CHUNK_SIZE = 1_000;
+
 /** Maps ConnectorType enum values to source strings used in entities. */
 function connectorTypeToSource(connectorType: string): string {
   return connectorType.toLowerCase().replace(/_/g, '-');
@@ -77,6 +79,14 @@ function countResultStatuses(results: NormalizedTestResult[]) {
     erroredCount: errored,
     flakyCount: flaky,
   };
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
 }
 
 @Injectable()
@@ -446,9 +456,11 @@ export class SyncService {
 
         // Batch create all test results
         if (resultDataBatch.length > 0) {
-          await prisma.testResult.createMany({
-            data: resultDataBatch,
-          });
+          for (const chunk of chunkArray(resultDataBatch, TEST_RESULT_CREATE_CHUNK_SIZE)) {
+            await prisma.testResult.createMany({
+              data: chunk,
+            });
+          }
         }
 
         // Mark test cases from automation runs as automated

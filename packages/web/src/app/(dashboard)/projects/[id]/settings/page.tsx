@@ -35,6 +35,12 @@ import { Select } from '@/components/ui/select';
 import { EmptyState } from '@/components/ui/empty-state';
 import { useProject } from '@/lib/api/hooks';
 import { apiClient } from '@/lib/api/client';
+import {
+  getManualSyncAcceptedMessage,
+  isManualSyncAccepted,
+  isSyncRequestTimeoutError,
+  type ManualSyncResponse,
+} from '@/lib/sync/manual-sync';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useDemoMode } from '@/app/_providers/demo-mode-provider';
 import { useAuth } from '@/app/_providers/auth-provider';
@@ -55,7 +61,7 @@ interface Connector {
   id: string;
   type: 'github' | 'testrail' | 'jira' | 'jira_stories' | 'junit_xml' | 'testng_xml';
   name: string;
-  status: 'active' | 'paused' | 'error';
+  status: 'active' | 'paused' | 'error' | 'syncing';
   lastSyncAt: string | null;
   /** Hard error from the last sync attempt (e.g. auth failure, GitHub 403). */
   lastSyncError: string | null;
@@ -126,6 +132,11 @@ const CONNECTOR_TYPE_LABELS: Record<Connector['type'], string> = {
   testng_xml: 'TestNG XML',
 };
 
+const SYNC_POLL_INTERVAL_MS = 3_000;
+const SYNC_POLL_MAX_ATTEMPTS = 120;
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // ─── KPI metric definitions ──────────────────────────────────────────
 
 interface KPIThreshold {
@@ -181,15 +192,16 @@ function ragToBadgeVariant(rag: 'GREEN' | 'AMBER' | 'RED') {
 
 function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; readOnly?: boolean }) {
   const queryClient = useQueryClient();
+  const fetchConnectors = useCallback(async () => {
+    try {
+      return await apiClient<any[]>(`/api/v1/projects/${projectId}/connectors`);
+    } catch {
+      return [];
+    }
+  }, [projectId]);
   const { data: rawConnectors = [] } = useQuery<any[]>({
     queryKey: ['connectors', projectId],
-    queryFn: async () => {
-      try {
-        return await apiClient<any[]>(`/api/v1/projects/${projectId}/connectors`);
-      } catch {
-        return [];
-      }
-    },
+    queryFn: fetchConnectors,
     staleTime: 10_000,
   });
   const connectors: Connector[] = rawConnectors
@@ -325,12 +337,69 @@ function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; rea
     setSyncMessages((prev) => new Map(prev).set(id, { type, text }));
   }, []);
 
+  const pollConnectorAfterSync = useCallback(async (
+    connectorId: string,
+    previousLastSyncAt: string | null,
+    previousStatus: Connector['status'],
+  ) => {
+    for (let attempt = 0; attempt < SYNC_POLL_MAX_ATTEMPTS; attempt++) {
+      await wait(SYNC_POLL_INTERVAL_MS);
+
+      const latestConnectors = await queryClient.fetchQuery<any[]>({
+        queryKey: ['connectors', projectId],
+        queryFn: fetchConnectors,
+        staleTime: 0,
+      });
+      const latest = latestConnectors.find((c) => c.id === connectorId);
+      if (!latest) continue;
+
+      const status = ((latest.status ?? 'ACTIVE') as string).toLowerCase() as Connector['status'];
+      const lastSyncAt = latest.lastSyncAt ?? null;
+      const lastSyncError = latest.lastSyncError ?? null;
+
+      if (status === 'error' && previousStatus !== 'error') {
+        updateSyncMsg(connectorId, 'error', `Sync failed: ${lastSyncError || 'Unknown error'}`);
+        setSyncLogs((prev) => new Map(prev).set(connectorId, [
+          ...(prev.get(connectorId) ?? []),
+          `Error: ${lastSyncError || 'Unknown error'}`,
+        ]));
+        return;
+      }
+
+      if (status === 'syncing' || lastSyncAt === previousLastSyncAt) {
+        updateSyncMsg(connectorId, 'info', 'Sync is running — waiting for connector status…');
+        continue;
+      }
+
+      if (lastSyncError) {
+        updateSyncMsg(connectorId, 'error', `Sync failed: ${lastSyncError}`);
+        setSyncLogs((prev) => new Map(prev).set(connectorId, [
+          ...(prev.get(connectorId) ?? []),
+          `Error: ${lastSyncError}`,
+        ]));
+      } else {
+        updateSyncMsg(connectorId, 'success', 'Sync completed successfully.');
+      }
+      return;
+    }
+
+    updateSyncMsg(
+      connectorId,
+      'info',
+      'Sync is still running. Connector status will continue updating in the background.',
+    );
+  }, [fetchConnectors, projectId, queryClient, updateSyncMsg]);
+
   const handleSync = async (connectorId: string) => {
+    const connectorBeforeSync = connectors.find((c) => c.id === connectorId);
+    const previousLastSyncAt = connectorBeforeSync?.lastSyncAt ?? null;
+    const previousStatus = connectorBeforeSync?.status ?? 'active';
+
     setSyncingIds((prev) => new Set(prev).add(connectorId));
     updateSyncMsg(connectorId, 'info', 'Sync started — fetching data from external source…');
     setSyncLogs((prev) => new Map(prev).set(connectorId, ['Sync started…']));
     try {
-      const result = await apiClient<{ success: boolean; error?: string; logs?: string[] }>(
+      const result = await apiClient<ManualSyncResponse>(
         `/api/v1/projects/${projectId}/connectors/${connectorId}/sync`,
         { method: 'POST', body: '{}' },
       );
@@ -339,14 +408,34 @@ function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; rea
       }
       if (!result.success) {
         updateSyncMsg(connectorId, 'error', `Sync failed: ${result.error || 'Unknown error'}`);
+      } else if (isManualSyncAccepted(result)) {
+        updateSyncMsg(connectorId, 'info', getManualSyncAcceptedMessage(result));
+        setSyncLogs((prev) => new Map(prev).set(connectorId, [
+          ...(prev.get(connectorId) ?? []),
+          result.jobId ? `Queued job: ${result.jobId}` : 'Sync queued.',
+        ]));
+        await pollConnectorAfterSync(connectorId, previousLastSyncAt, previousStatus);
       } else {
         updateSyncMsg(connectorId, 'success', 'Sync completed successfully.');
       }
       await queryClient.invalidateQueries({ queryKey: ['connectors', projectId] });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      updateSyncMsg(connectorId, 'error', `Sync failed: ${msg}`);
-      setSyncLogs((prev) => new Map(prev).set(connectorId, [...(prev.get(connectorId) ?? []), `Error: ${msg}`]));
+      if (isSyncRequestTimeoutError(err)) {
+        updateSyncMsg(
+          connectorId,
+          'info',
+          'Sync request timed out, but the backend may still be running it — checking connector status…',
+        );
+        setSyncLogs((prev) => new Map(prev).set(connectorId, [
+          ...(prev.get(connectorId) ?? []),
+          `Request timeout: ${msg}`,
+        ]));
+        await pollConnectorAfterSync(connectorId, previousLastSyncAt, previousStatus);
+      } else {
+        updateSyncMsg(connectorId, 'error', `Sync failed: ${msg}`);
+        setSyncLogs((prev) => new Map(prev).set(connectorId, [...(prev.get(connectorId) ?? []), `Error: ${msg}`]));
+      }
     } finally {
       setSyncingIds((prev) => { const next = new Set(prev); next.delete(connectorId); return next; });
       // Auto-dismiss success after 8s
@@ -804,7 +893,9 @@ function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; rea
                 ? 'success'
                 : connector.status === 'paused'
                   ? 'neutral'
-                  : 'error';
+                  : connector.status === 'syncing'
+                    ? 'warning'
+                    : 'error';
             const statusLabel =
               connector.status.charAt(0).toUpperCase() + connector.status.slice(1);
 
@@ -852,10 +943,10 @@ function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; rea
                       variant="ghost"
                       size="sm"
                       title="Sync Now"
-                      disabled={syncingIds.has(connector.id)}
+                      disabled={syncingIds.has(connector.id) || connector.status === 'syncing'}
                       onClick={() => handleSync(connector.id)}
                     >
-                      <RefreshCw className={cn("h-3.5 w-3.5", syncingIds.has(connector.id) && "animate-spin")} />
+                      <RefreshCw className={cn("h-3.5 w-3.5", (syncingIds.has(connector.id) || connector.status === 'syncing') && "animate-spin")} />
                     </Button>
                     {!readOnly && (
                       <>
@@ -863,6 +954,7 @@ function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; rea
                           variant="ghost"
                           size="sm"
                           title={connector.status === 'paused' ? 'Resume' : 'Pause'}
+                          disabled={connector.status === 'syncing'}
                           onClick={() => handleTogglePause(connector)}
                         >
                           {connector.status === 'paused' ? (

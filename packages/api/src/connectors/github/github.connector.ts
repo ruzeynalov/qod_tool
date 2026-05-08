@@ -278,16 +278,38 @@ export class GitHubConnector implements IQODConnector {
         const tierParsed: Array<{ name: string; parsed: number; bytes: number; entries: number }> = [];
         this.logger.log(
           `  Trying artifact tier "${tier.label}" with ${tierArtifacts.length} artifact(s): ` +
-          `[${tierArtifacts.map((a) => a.name).join(', ')}]`,
+          `[${tierArtifacts.map((a) => a.name).join(', ')}] ` +
+          `(concurrency=${GitHubConnector.ARTIFACT_DOWNLOAD_CONCURRENCY})`,
         );
 
-        for (const artifact of tierArtifacts) {
-          attemptedArtifactIds.add(artifact.id);
-          try {
-            const downloadResult = await this.downloadAndParseAllureArtifact(
-              creds,
-              artifact.id,
-            );
+        for (const artifact of tierArtifacts) attemptedArtifactIds.add(artifact.id);
+
+        const artifactOutcomes = await this.mapWithConcurrency(
+          tierArtifacts,
+          GitHubConnector.ARTIFACT_DOWNLOAD_CONCURRENCY,
+          async (artifact): Promise<{
+            artifact: GitHubArtifact;
+            downloadResult?: { results: AllureResult[]; bytes: number; zipEntries: number };
+            errorMessage?: string;
+          }> => {
+            try {
+              const downloadResult = await this.downloadAndParseAllureArtifact(
+                creds,
+                artifact.id,
+              );
+              return { artifact, downloadResult };
+            } catch (err) {
+              return {
+                artifact,
+                errorMessage: err instanceof Error ? err.message : String(err),
+              };
+            }
+          },
+        );
+
+        for (const outcome of artifactOutcomes) {
+          const { artifact, downloadResult, errorMessage } = outcome;
+          if (downloadResult) {
             tierResults.push(...downloadResult.results);
             tierParsed.push({
               name: artifact.name,
@@ -305,11 +327,11 @@ export class GitHubConnector implements IQODConnector {
               `${downloadResult.zipEntries} zip entries, ` +
               `${downloadResult.results.length} test results parsed`,
             );
-          } catch (err) {
+          } else {
             // Promote download failures to ERROR so they're visible in
             // production logs (most CI/CD log routers default to filtering
             // WARN+). Include the HTTP status / error message verbatim.
-            const message = err instanceof Error ? err.message : String(err);
+            const message = errorMessage ?? 'Unknown artifact download error';
             this.logger.error(
               `  FAILED to download artifact ${artifact.id} (${artifact.name}): ${message}`,
             );
@@ -672,6 +694,30 @@ export class GitHubConnector implements IQODConnector {
 
   /** Timeout for downloading a single artifact (60 seconds). */
   private static readonly ARTIFACT_TIMEOUT = 60_000;
+
+  /** Bounded parallelism for artifact downloads within a single run. */
+  private static readonly ARTIFACT_DOWNLOAD_CONCURRENCY = 4;
+
+  private async mapWithConcurrency<T, R>(
+    items: T[],
+    concurrency: number,
+    mapper: (item: T, index: number) => Promise<R>,
+  ): Promise<R[]> {
+    if (items.length === 0) return [];
+
+    const results = new Array<R>(items.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex++;
+        results[index] = await mapper(items[index], index);
+      }
+    }));
+
+    return results;
+  }
 
   private async downloadAndParseAllureArtifact(
     creds: GitHubCredentials,

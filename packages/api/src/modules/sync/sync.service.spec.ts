@@ -323,6 +323,37 @@ describe('SyncService', () => {
       });
     });
 
+    it('should chunk large test result batches', async () => {
+      const results = Array.from({ length: 1001 }, (_, i) => ({
+        testExternalId: `TC-${i}`,
+        testTitle: `Test ${i}`,
+        status: 'PASSED' as const,
+        durationMs: 100,
+      }));
+      const testRuns: NormalizedTestRun[] = [{
+        ...sampleTestRuns()[0],
+        results,
+      }];
+
+      prisma.testCase.findMany.mockResolvedValue(
+        results.map((r, i) => ({
+          id: `tc-uuid-${i}`,
+          externalId: r.testExternalId,
+          source: SOURCE,
+          automationStatus: 'AUTOMATED',
+        })),
+      );
+      prisma.testRun.upsert.mockResolvedValue({ id: 'run-uuid' });
+      prisma.testResult.createMany.mockResolvedValue({ count: 1000 });
+      prisma.testResult.deleteMany.mockResolvedValue({ count: 0 });
+
+      await service.syncTestRuns(PROJECT_ID, CONNECTOR_CONFIG_ID, testRuns, SOURCE);
+
+      expect(prisma.testResult.createMany).toHaveBeenCalledTimes(2);
+      expect(prisma.testResult.createMany.mock.calls[0][0].data).toHaveLength(1000);
+      expect(prisma.testResult.createMany.mock.calls[1][0].data).toHaveLength(1);
+    });
+
     it('should handle empty results array', async () => {
       const result = await service.syncTestRuns(PROJECT_ID, CONNECTOR_CONFIG_ID, [], SOURCE);
 

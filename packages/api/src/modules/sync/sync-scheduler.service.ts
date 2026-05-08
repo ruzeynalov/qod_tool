@@ -99,6 +99,25 @@ export class SyncSchedulerService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  async queueManualSync(connectorConfigId: string): Promise<{ jobId: string }> {
+    const job = await this.queue.add(
+      'manual-sync',
+      { connectorConfigId },
+      {
+        jobId: `manual-sync-${connectorConfigId}-${Date.now()}`,
+        removeOnComplete: true,
+        removeOnFail: false,
+        attempts: 1,
+      },
+    );
+
+    const jobId = String(job.id ?? '');
+    this.logger.log(
+      `Queued manual sync job ${jobId} for connector ${connectorConfigId}`,
+    );
+    return { jobId };
+  }
+
   async removeConnectorSchedule(connectorConfigId: string): Promise<void> {
     const repeatableJobs = await this.queue.getRepeatableJobs();
     const jobId = `sync-${connectorConfigId}`;
