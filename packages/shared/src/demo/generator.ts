@@ -117,6 +117,13 @@ export interface DemoTestRun {
   skippedCount: number;
   flakyCount: number;
   erroredCount: number;
+  /**
+   * `TEST_RESULTS` (default) when counts come from per-test rows; `CI_JOBS`
+   * when the connector fell back to shard/job conclusions because no
+   * per-test artifact was parseable. The Run History UI labels CI_JOBS
+   * rows as "shards" instead of "tests".
+   */
+  countSource: 'TEST_RESULTS' | 'CI_JOBS';
   results: DemoTestResult[];
   pipelineRunId: string;
   isRerun: boolean;
@@ -384,6 +391,7 @@ export function generateDemoData(config: DemoConfig = DEFAULT_DEMO_CONFIG): Demo
         skippedCount: skipped,
         flakyCount: flaky,
         erroredCount: 0,
+        countSource: 'TEST_RESULTS',
         results,
         pipelineRunId: pipelineId,
         isRerun: false,
@@ -453,6 +461,7 @@ export function generateDemoData(config: DemoConfig = DEFAULT_DEMO_CONFIG): Demo
           skippedCount: rerunSkipped,
           flakyCount: rerunFlaky,
           erroredCount: 0,
+          countSource: 'TEST_RESULTS',
           results: rerunResults,
           pipelineRunId: rerunPipelineId,
           isRerun: true,

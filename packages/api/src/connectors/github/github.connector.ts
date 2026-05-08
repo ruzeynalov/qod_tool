@@ -5,6 +5,7 @@ import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { Logger } from '@nestjs/common';
 import AdmZip from 'adm-zip';
+import { XMLParser } from 'fast-xml-parser';
 import type {
   IQODConnector,
   ConnectorConfig,
@@ -31,8 +32,23 @@ interface GitHubCredentials {
 
 type PipelineStatus = NormalizedPipelineRun['status'];
 
+interface ArtifactSelectionTier {
+  label: string;
+  artifacts: GitHubArtifact[];
+}
+
 export class GitHubConnector implements IQODConnector {
   private readonly logger = new Logger(GitHubConnector.name);
+  /**
+   * Reused parser for tier-3 JUnit/XUnit XML fallback. Configured to keep
+   * attribute names visible (prefixed `@_`) so downstream code can read
+   * `name`, `classname`, `time`, etc. directly without bespoke handling.
+   */
+  private readonly junitXmlParser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '@_',
+    textNodeName: '#text',
+  });
   readonly name = 'github';
   readonly type: ConnectorCategory = 'ci';
 
@@ -79,10 +95,101 @@ export class GitHubConnector implements IQODConnector {
 
   // ──────────────── Test Runs (Allure Artifacts) ────────────────
 
+  /**
+   * Names of artifacts seen in the most recent fetchTestRuns call that did
+   * not match any default/configured pattern. Sampled across all runs so
+   * SyncService can surface a configuration warning to the connector status.
+   */
+  private lastSyncUnmatchedArtifactNames: string[] = [];
+  /**
+   * Number of completed runs whose artifact NAMES did not match any pattern
+   * (configured or default). This is the "configure artifactPattern" signal.
+   */
+  private lastSyncRunsWithoutMatchedArtifacts = 0;
+  /**
+   * Number of completed runs whose artifacts MATCHED a pattern but parsed
+   * zero test results — typically a malformed file or an unsupported report
+   * layout. This is the "fix the workflow's
+   * artifact contents" signal, distinct from the name-mismatch above.
+   * Codex review: previously these two cases were collapsed into a single
+   * counter that the SyncService warning then mislabelled as "did not
+   * match the connector pattern".
+   */
+  private lastSyncRunsWithoutParsedResults = 0;
+  /**
+   * Number of completed runs where ≥1 artifact download failed (auth, 404,
+   * 410, network, etc.). Tracked separately from name-mismatch and
+   * matched-but-empty so the user-facing warning can correctly point at
+   * token scope / artifact retention rather than "configure
+   * artifactPattern" or "upload raw Allure". Codex review on `5336fc6`:
+   * if every matching artifact 403s, the previous code treated the run as
+   * matched-but-empty and told the user to upload raw Allure — wrong fix.
+   */
+  private lastSyncRunsWithDownloadFailures = 0;
+  /** Sample of distinct HTTP error messages seen during artifact downloads. */
+  private lastSyncDownloadErrorSamples: string[] = [];
+  /**
+   * Number of completed runs where artifacts exist but every artifact is
+   * expired. This is a "selected workflow may be stale / artifacts expired"
+   * signal, not an artifactPattern problem.
+   */
+  private lastSyncRunsWithExpiredOnlyArtifacts = 0;
+  /** Sample of expired artifact names seen during expired-only runs. */
+  private lastSyncExpiredArtifactNames: string[] = [];
+  /** Total completed runs processed in the last fetch. */
+  private lastSyncCompletedRuns = 0;
+
+  /** Diagnostics from the most recent fetchTestRuns call (used by SyncService). */
+  getDiagnostics(): {
+    completedRuns: number;
+    runsWithoutMatchedArtifacts: number;
+    runsWithoutParsedResults: number;
+    runsWithDownloadFailures: number;
+    runsWithExpiredOnlyArtifacts: number;
+    sampleUnmatchedArtifactNames: string[];
+    sampleDownloadErrors: string[];
+    sampleExpiredArtifactNames: string[];
+  } {
+    return {
+      completedRuns: this.lastSyncCompletedRuns,
+      runsWithoutMatchedArtifacts: this.lastSyncRunsWithoutMatchedArtifacts,
+      runsWithoutParsedResults: this.lastSyncRunsWithoutParsedResults,
+      runsWithDownloadFailures: this.lastSyncRunsWithDownloadFailures,
+      runsWithExpiredOnlyArtifacts: this.lastSyncRunsWithExpiredOnlyArtifacts,
+      sampleUnmatchedArtifactNames: this.lastSyncUnmatchedArtifactNames.slice(0, 20),
+      sampleDownloadErrors: this.lastSyncDownloadErrorSamples.slice(0, 5),
+      sampleExpiredArtifactNames: this.lastSyncExpiredArtifactNames.slice(0, 20),
+    };
+  }
+
   async fetchTestRuns(config: ConnectorConfig, _since?: Date): Promise<NormalizedTestRun[]> {
     const creds = this.extractCredentials(config);
     const branch = creds.branch || 'main';
     const maxRuns = creds.maxRuns || 10;
+
+    // Reset diagnostics for this sync.
+    this.lastSyncUnmatchedArtifactNames = [];
+    this.lastSyncRunsWithoutMatchedArtifacts = 0;
+    this.lastSyncRunsWithoutParsedResults = 0;
+    this.lastSyncRunsWithDownloadFailures = 0;
+    this.lastSyncDownloadErrorSamples = [];
+    this.lastSyncRunsWithExpiredOnlyArtifacts = 0;
+    this.lastSyncExpiredArtifactNames = [];
+    this.lastSyncCompletedRuns = 0;
+    const seenUnmatchedSet = new Set<string>();
+    const seenDownloadErrors = new Set<string>();
+    const seenExpiredArtifactNames = new Set<string>();
+
+    // Echo the effective configuration so admins can verify their setup
+    // matches what they expected — especially `artifactPattern`, since a
+    // misconfigured pattern silently filters out every artifact and is the
+    // most common cause of "0 / 0 / 0" or "X shards (no test data)" rows.
+    this.logger.log(
+      `fetchTestRuns config: owner=${creds.owner} repo=${creds.repo} ` +
+      `branch=${branch} maxRuns=${maxRuns} ` +
+      `workflowFile=${creds.workflowFile ?? '<all>'} ` +
+      `artifactPattern=${creds.artifactPattern ?? '<defaults: allure-results-shard-N → allure-results[-N|-merged] → allure-report-shard-N → JUnit/playwright/cypress>'}`,
+    );
 
     // 1. Fetch recent completed workflow runs.
     // When workflowFile is configured, scope to that workflow + branch + completed.
@@ -100,6 +207,7 @@ export class GitHubConnector implements IQODConnector {
     for (let i = 0; i < runs.length; i++) {
       const run = runs[i];
       if (run.status !== 'completed') continue;
+      this.lastSyncCompletedRuns++;
 
       this.logger.log(`Processing run ${i + 1}/${runs.length}: #${run.run_number} (id: ${run.id})`);
 
@@ -115,40 +223,170 @@ export class GitHubConnector implements IQODConnector {
       const artifacts = await this.fetchArtifactsForRun(creds, run.id);
 
       // 4. Download & parse matching artifacts
-      // Use configured artifactPattern, default to Allure shard pattern, then fall back to common JUnit patterns
       const allResults: AllureResult[] = [];
-      const artifactPattern = creds.artifactPattern;
-      let matchingArtifacts: GitHubArtifact[];
-
-      if (artifactPattern) {
-        // User-configured pattern (supports simple wildcards: * matches any chars)
-        const regex = new RegExp('^' + artifactPattern.replace(/\*/g, '.*') + '$');
-        matchingArtifacts = artifacts.filter((a) => regex.test(a.name) && !a.expired);
-      } else {
-        // Default: try Allure shard artifacts first
-        matchingArtifacts = artifacts.filter(
-          (a) => /^allure-results-shard-\d+$/.test(a.name) && !a.expired,
-        );
-        // Fallback: look for common JUnit/test result artifact names
-        if (matchingArtifacts.length === 0) {
-          matchingArtifacts = artifacts.filter(
-            (a) => /^(test-results|junit-results|test-report|surefire-reports)/.test(a.name) && !a.expired,
+      const artifactTiers = this.selectArtifactTiers(artifacts, creds.artifactPattern);
+      const expiredCount = artifacts.filter((a) => a.expired).length;
+      const matchedNames = Array.from(new Set(artifactTiers.flatMap((tier) => tier.artifacts.map((a) => a.name))));
+      const tierSummary = artifactTiers.length > 0
+        ? artifactTiers
+          .map((tier) => `${tier.label}=[${tier.artifacts.map((a) => a.name).join(', ')}]`)
+          .join('; ')
+        : 'none';
+      // Step 1 (Codex precision): per-run diagnostic line distinguishes
+      // "name didn't match" from "name matched but parsed 0 results".
+      this.logger.log(
+        `  Artifacts: ${artifacts.length} total, ${expiredCount} expired, ${matchedNames.length} matched ` +
+        `(tiers: ${tierSummary})`,
+      );
+      if (artifactTiers.length === 0 && artifacts.length > 0) {
+        // No defaults / configured pattern matched any non-expired artifact —
+        // surface the seen names so the user can configure `artifactPattern`.
+        const seenNames = artifacts.filter((a) => !a.expired).map((a) => a.name);
+        // Codex review: only count this run as a name-mismatch when there
+        // was at least one *non-expired* artifact whose name failed to
+        // match. Expired-only runs cannot be fixed with `artifactPattern`
+        // and would otherwise inflate the connector warning misleadingly.
+        if (seenNames.length > 0) {
+          this.logger.warn(
+            `  No artifact matched the connector's pattern — saw [${seenNames.join(', ')}]. ` +
+            `Configure 'artifactPattern' in connector settings if your repo uses a custom name.`,
           );
+          for (const n of seenNames) seenUnmatchedSet.add(n);
+          this.lastSyncRunsWithoutMatchedArtifacts++;
+        } else {
+          // All artifacts on the run were expired. This cannot be fixed with
+          // artifactPattern, but it is still useful as a soft warning when it
+          // happens repeatedly: the selected workflow may be stale, or
+          // artifacts may expire before QOD syncs them.
+          this.logger.debug(
+            `  All ${artifacts.length} artifact(s) on this run were expired; nothing to parse.`,
+          );
+          this.lastSyncRunsWithExpiredOnlyArtifacts++;
+          for (const artifact of artifacts) seenExpiredArtifactNames.add(artifact.name);
         }
       }
-      const expiredCount = artifacts.filter((a) => a.expired).length;
-      this.logger.log(`  Found ${matchingArtifacts.length} matching artifacts (${artifacts.length} total, ${expiredCount} expired)`);
 
-      for (const artifact of matchingArtifacts) {
-        try {
-          const results = await this.downloadAndParseAllureArtifact(
-            creds,
-            artifact.id,
-          );
-          allResults.push(...results);
-        } catch (err) {
-          this.logger.warn(`  Failed to download artifact ${artifact.id} (${artifact.name}): ${err instanceof Error ? err.message : err}`);
+      const parsedPerArtifact: Array<{ name: string; parsed: number; bytes: number; entries: number }> = [];
+      let runHadDownloadFailure = false;
+      let selectedTierLabel: string | null = null;
+      const attemptedArtifactIds = new Set<number>();
+      for (const tier of artifactTiers) {
+        const tierArtifacts = tier.artifacts.filter((artifact) => !attemptedArtifactIds.has(artifact.id));
+        if (tierArtifacts.length === 0) continue;
+
+        const tierResults: AllureResult[] = [];
+        const tierParsed: Array<{ name: string; parsed: number; bytes: number; entries: number }> = [];
+        this.logger.log(
+          `  Trying artifact tier "${tier.label}" with ${tierArtifacts.length} artifact(s): ` +
+          `[${tierArtifacts.map((a) => a.name).join(', ')}] ` +
+          `(concurrency=${GitHubConnector.ARTIFACT_DOWNLOAD_CONCURRENCY})`,
+        );
+
+        for (const artifact of tierArtifacts) attemptedArtifactIds.add(artifact.id);
+
+        const artifactOutcomes = await this.mapWithConcurrency(
+          tierArtifacts,
+          GitHubConnector.ARTIFACT_DOWNLOAD_CONCURRENCY,
+          async (artifact): Promise<{
+            artifact: GitHubArtifact;
+            downloadResult?: { results: AllureResult[]; bytes: number; zipEntries: number };
+            errorMessage?: string;
+          }> => {
+            try {
+              const downloadResult = await this.downloadAndParseAllureArtifact(
+                creds,
+                artifact.id,
+              );
+              return { artifact, downloadResult };
+            } catch (err) {
+              return {
+                artifact,
+                errorMessage: err instanceof Error ? err.message : String(err),
+              };
+            }
+          },
+        );
+
+        for (const outcome of artifactOutcomes) {
+          const { artifact, downloadResult, errorMessage } = outcome;
+          if (downloadResult) {
+            tierResults.push(...downloadResult.results);
+            tierParsed.push({
+              name: artifact.name,
+              parsed: downloadResult.results.length,
+              bytes: downloadResult.bytes,
+              entries: downloadResult.zipEntries,
+            });
+            // INFO-level visibility: every artifact download. If a customer
+            // sees thousands of test results locally but zero in QOD, this
+            // line in the connector logs immediately tells them whether the
+            // download / unzip / parse step is what's failing.
+            this.logger.log(
+              `  Artifact "${artifact.name}" (${artifact.id}): ` +
+              `downloaded ${(downloadResult.bytes / 1024).toFixed(1)} KB, ` +
+              `${downloadResult.zipEntries} zip entries, ` +
+              `${downloadResult.results.length} test results parsed`,
+            );
+          } else {
+            // Promote download failures to ERROR so they're visible in
+            // production logs (most CI/CD log routers default to filtering
+            // WARN+). Include the HTTP status / error message verbatim.
+            const message = errorMessage ?? 'Unknown artifact download error';
+            this.logger.error(
+              `  FAILED to download artifact ${artifact.id} (${artifact.name}): ${message}`,
+            );
+            tierParsed.push({ name: artifact.name, parsed: 0, bytes: 0, entries: 0 });
+            runHadDownloadFailure = true;
+            // Strip artifactId-specific context so identical 401/403/410
+            // failures across many runs collapse into a single sample.
+            const sample = message.replace(/artifact \d+/, 'artifact <id>');
+            seenDownloadErrors.add(sample);
+          }
         }
+
+        parsedPerArtifact.push(...tierParsed);
+        if (tierResults.length > 0) {
+          allResults.push(...tierResults);
+          selectedTierLabel = tier.label;
+          break;
+        }
+
+        this.logger.warn(
+          `  Artifact tier "${tier.label}" parsed 0 test results; trying next tier if available.`,
+        );
+      }
+      if (runHadDownloadFailure && allResults.length === 0) {
+        // Codex review on `5336fc6`: track this separately from
+        // matched-but-empty so the SyncService warning text can point at
+        // token scope / artifact retention instead of telling the user to
+        // upload raw Allure when the real problem is auth.
+        this.lastSyncRunsWithDownloadFailures++;
+      }
+
+      // Step 1: surface "matched-but-empty" specifically — distinct from
+      // the unmatched-name case above. Increments its own counter so the
+      // SyncService warning can be specific about which failure mode.
+      // Codex review: if every download failed (auth/scope/expired), 0
+      // results is the *consequence*, not the cause — `runHadDownloadFailure`
+      // already accounted for that, and incrementing matched-but-empty here
+      // would surface "upload raw Allure" advice instead of the real
+      // "fix token scope" guidance. Only increment when at least one
+      // artifact downloaded successfully but the contents were unparseable.
+      const allMatchingFailed = runHadDownloadFailure &&
+        parsedPerArtifact.every((p) => p.bytes === 0 && p.entries === 0);
+      if (artifactTiers.length > 0 && allResults.length === 0 && !allMatchingFailed) {
+        this.logger.warn(
+          `  Matched ${matchedNames.length} artifact(s) but parsed 0 test results: ` +
+          parsedPerArtifact.map((p) => `${p.name}=${p.parsed}`).join(', ') +
+          `. Artifact may contain a malformed file or an unsupported report layout.`,
+        );
+        this.lastSyncRunsWithoutParsedResults++;
+      } else if (allResults.length > 0) {
+        this.logger.log(
+          `  Parsed ${allResults.length} test results` +
+          `${selectedTierLabel ? ` from tier "${selectedTierLabel}"` : ''}: ` +
+          parsedPerArtifact.map((p) => `${p.name}=${p.parsed}`).join(', '),
+        );
       }
 
       // 5. Always emit a NormalizedTestRun for each completed workflow run,
@@ -156,14 +394,108 @@ export class GitHubConnector implements IQODConnector {
       // failures, expired artifacts, missing upload step) must still appear in
       // test_runs so Run Health / Daily Run Results / Run History count them.
       if (allResults.length === 0) {
-        this.logger.log(`  No test results parsed — emitting run with empty results (conclusion=${run.conclusion ?? 'null'})`);
-      } else {
-        this.logger.log(`  Parsed ${allResults.length} Allure results`);
+        this.logger.log(`  Emitting run with empty results (conclusion=${run.conclusion ?? 'null'})`);
       }
       testRuns.push(this.mapAllureToTestRun(run, allResults, relevantJobs));
     }
 
+    this.lastSyncUnmatchedArtifactNames = Array.from(seenUnmatchedSet).sort();
+    this.lastSyncDownloadErrorSamples = Array.from(seenDownloadErrors);
+    this.lastSyncExpiredArtifactNames = Array.from(seenExpiredArtifactNames).sort();
+
+    // INFO-level end-of-sync summary so admins can see whether parsing
+    // worked at all, without sifting per-run lines.
+    const totalParsedResults = testRuns.reduce(
+      (sum, r) => sum + (r.results?.length ?? 0),
+      0,
+    );
+    const summaryFallbackCount = testRuns.filter((r) => r.countSource === 'CI_JOBS').length;
+    this.logger.log(
+      `fetchTestRuns summary: ${this.lastSyncCompletedRuns} completed runs, ` +
+      `${totalParsedResults} test results parsed across all artifacts, ` +
+      `${summaryFallbackCount} runs fell back to shard counts ` +
+      `(unmatched-artifact: ${this.lastSyncRunsWithoutMatchedArtifacts}, ` +
+      `matched-but-empty: ${this.lastSyncRunsWithoutParsedResults}, ` +
+      `download-failure: ${this.lastSyncRunsWithDownloadFailures}, ` +
+      `expired-only: ${this.lastSyncRunsWithExpiredOnlyArtifacts})`,
+    );
     return testRuns;
+  }
+
+  /**
+   * Pick matching artifacts in priority order. The fetch loop tries each tier
+   * until one parses real results. That keeps raw Allure preferred while still
+   * letting generated `allure-report-*` artifacts recover when raw artifacts
+   * are absent, empty, expired, or unavailable.
+   *
+   * Priority:
+   *   1. User-configured `artifactPattern` (supports `*` wildcards).
+   *   2. Strict raw-Allure shard pattern: `allure-results-shard-N`.
+   *   3. Common Allure naming variants:
+   *        - `allure-results` / `allure-results-N` (non-`shard-` numeric)
+   *        - `allure-results-(merged|combined|all)`
+   *      Limited to that small set so we don't match `allure-report` (HTML).
+   *   4. Built Allure report names: `allure-report-shard-N`.
+   *   5. Common JUnit/test-result artifact names — last resort.
+   */
+  private selectArtifactTiers(
+    artifacts: GitHubArtifact[],
+    artifactPattern: string | undefined,
+  ): ArtifactSelectionTier[] {
+    const fresh = artifacts.filter((a) => !a.expired);
+    const tiers: ArtifactSelectionTier[] = [];
+
+    if (artifactPattern) {
+      const regex = new RegExp('^' + artifactPattern.replace(/\*/g, '.*') + '$');
+      const configured = fresh.filter((a) => regex.test(a.name));
+      if (configured.length > 0) {
+        tiers.push({ label: 'configured-pattern', artifacts: configured });
+      }
+    }
+
+    // Tier 2: strict raw shard pattern
+    const tier2 = fresh.filter((a) => /^allure-results-shard-\d+(?:\.zip)?$/.test(a.name));
+    if (tier2.length > 0) {
+      tiers.push({ label: 'raw-allure-shards', artifacts: tier2 });
+    }
+
+    // Tier 3: broader Allure naming variants — bare, indexed, merged. Avoids
+    // `allure-report` (built HTML) and other ad-hoc names.
+    const tier3 = fresh.filter(
+      (a) =>
+        a.name === 'allure-results' ||
+        /^allure-results-\d+(?:\.zip)?$/.test(a.name) ||
+        /^allure-results-(merged|combined|all|raw)(?:\.zip)?$/.test(a.name),
+    );
+    if (tier3.length > 0) {
+      tiers.push({ label: 'raw-allure-variants', artifacts: tier3 });
+    }
+
+    // Tier 4: generated Allure 2 HTML report artifacts. These usually
+    // contain `data/test-cases/*.json`; parse them only after raw results
+    // fail because built reports collapse retry attempts.
+    const tier4 = fresh.filter(
+      (a) =>
+        a.name === 'allure-report' ||
+        /^allure-report-(?:shard-)?\d+(?:\.zip)?$/.test(a.name) ||
+        /^allure-report-(merged|combined|all)(?:\.zip)?$/.test(a.name),
+    );
+    if (tier4.length > 0) {
+      tiers.push({ label: 'built-allure-reports', artifacts: tier4 });
+    }
+
+    // Tier 5: JUnit / surefire / test-report / playwright-report patterns.
+    // Slightly broader than before — covers `playwright-report-*`,
+    // `cypress-results`, etc. The actual content is parsed downstream by
+    // tier 1/2/3 of `extractAllureResults`.
+    const tier5 = fresh.filter((a) =>
+      /^(test-results|junit-results|junit|test-report|surefire-reports|playwright-report|cypress-results)/.test(a.name),
+    );
+    if (tier5.length > 0) {
+      tiers.push({ label: 'generic-test-reports', artifacts: tier5 });
+    }
+
+    return tiers;
   }
 
   // ──────────────── Webhooks ────────────────
@@ -363,10 +695,34 @@ export class GitHubConnector implements IQODConnector {
   /** Timeout for downloading a single artifact (60 seconds). */
   private static readonly ARTIFACT_TIMEOUT = 60_000;
 
+  /** Bounded parallelism for artifact downloads within a single run. */
+  private static readonly ARTIFACT_DOWNLOAD_CONCURRENCY = 4;
+
+  private async mapWithConcurrency<T, R>(
+    items: T[],
+    concurrency: number,
+    mapper: (item: T, index: number) => Promise<R>,
+  ): Promise<R[]> {
+    if (items.length === 0) return [];
+
+    const results = new Array<R>(items.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex++;
+        results[index] = await mapper(items[index], index);
+      }
+    }));
+
+    return results;
+  }
+
   private async downloadAndParseAllureArtifact(
     creds: GitHubCredentials,
     artifactId: number,
-  ): Promise<AllureResult[]> {
+  ): Promise<{ results: AllureResult[]; bytes: number; zipEntries: number }> {
     // GitHub returns a 302 redirect to a signed download URL
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GitHubConnector.ARTIFACT_TIMEOUT);
@@ -385,13 +741,20 @@ export class GitHubConnector implements IQODConnector {
       );
 
       if (!response.ok) {
-        throw new Error(`Failed to download artifact ${artifactId}: ${response.status}`);
+        // Include enough context that the user can immediately see what
+        // GitHub returned. Common modes: 401 (token expired/missing),
+        // 403 (token lacks `actions:read` / fine-grained scope), 410
+        // (artifact expired between list and download).
+        throw new Error(
+          `Failed to download artifact ${artifactId}: HTTP ${response.status} ${response.statusText}`,
+        );
       }
 
       const contentLength = parseInt(response.headers.get('content-length') ?? '0', 10);
       const useTempFile = contentLength > GitHubConnector.ARTIFACT_MEM_LIMIT;
 
       let zip: AdmZip;
+      let bytes: number;
 
       if (useTempFile && response.body) {
         // Stream large artifacts to a temp file to avoid OOM
@@ -399,9 +762,11 @@ export class GitHubConnector implements IQODConnector {
         try {
           const nodeStream = Readable.fromWeb(response.body as any);
           await pipeline(nodeStream, fs.createWriteStream(tmpFile));
+          bytes = fs.statSync(tmpFile).size;
           zip = new AdmZip(tmpFile);
+          const entries = zip.getEntries();
           const results = this.extractAllureResults(zip);
-          return results;
+          return { results, bytes, zipEntries: entries.length };
         } finally {
           try { fs.unlinkSync(tmpFile); } catch (e) { this.logger.debug(`Failed to clean up temp file ${tmpFile}: ${e}`); }
         }
@@ -409,57 +774,390 @@ export class GitHubConnector implements IQODConnector {
 
       // Default: process in memory
       const arrayBuffer = await response.arrayBuffer();
+      bytes = arrayBuffer.byteLength;
       zip = new AdmZip(Buffer.from(arrayBuffer));
-      return this.extractAllureResults(zip);
+      const entries = zip.getEntries();
+      const results = this.extractAllureResults(zip);
+      return { results, bytes, zipEntries: entries.length };
     } finally {
       clearTimeout(timer);
     }
   }
 
+  /**
+   * Parse a downloaded artifact zip into per-test results. Tries (in order):
+   *   1. Raw Allure JSON (`*-result.json`) — preserves retry info.
+   *   2. Built Allure 2 HTML report (`data/test-cases/*.json`).
+   *   3. JUnit / XUnit-style XML (`*.xml`) — many workflows publish this
+   *      alongside or instead of Allure. Real-world QOD users have run into
+   *      uniform 0/0/0 results because their artifact contains JUnit XML
+   *      while QOD only knew how to parse Allure JSON.
+   *
+   * Returns the FIRST tier that produces results so we don't double-count
+   * when multiple formats coexist in the same zip (e.g. Allure JSON +
+   * JUnit XML side by side).
+   *
+   * Logs a sample of zip entry names when nothing parses, so the connector
+   * warning + logs let users / admins see what the artifact actually
+   * contains and configure / fix their workflow accordingly.
+   */
   private extractAllureResults(zip: AdmZip): AllureResult[] {
-    const results: AllureResult[] = [];
-    for (const entry of zip.getEntries()) {
+    const entries = zip.getEntries();
+
+    // Tier 1: raw Allure JSON.
+    const allureRaw: AllureResult[] = [];
+    let allureRawCandidates = 0;
+    for (const entry of entries) {
       if (entry.isDirectory || !entry.entryName.endsWith('-result.json')) continue;
+      allureRawCandidates++;
       try {
         const content = entry.getData().toString('utf8');
         const parsed = JSON.parse(content) as AllureResultJson;
-        results.push(this.parseAllureResult(parsed));
+        allureRaw.push(this.parseAllureResult(parsed));
       } catch (error) {
         this.logger.debug(`Skipping malformed Allure entry ${entry.entryName}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (allureRaw.length > 0) return allureRaw;
+
+    // Tier 2: built Allure 2 HTML report (`allure generate` output).
+    const builtAllure = this.extractBuiltAllureReport(zip);
+    if (builtAllure.length > 0) return builtAllure;
+
+    // Tier 3: JUnit/XUnit XML. Common in workflows that haven't migrated to
+    // Allure JSON yet, or that publish JUnit XML in addition to Allure
+    // (e.g. via Maven Surefire / pytest --junit-xml / gradle test).
+    const junit = this.extractJUnitXml(zip);
+    if (junit.length > 0) return junit;
+
+    // Diagnostic: when nothing parses, log the zip's top-level structure so
+    // the user can tell whether their artifact contains JUnit / Cucumber /
+    // TestNG / something else and either configure `artifactPattern` or
+    // fix their workflow's upload step. Sampled to avoid log spam on huge
+    // artifacts.
+    const sample = entries
+      .filter((e) => !e.isDirectory)
+      .slice(0, 25)
+      .map((e) => e.entryName);
+    this.logger.warn(
+      `  Artifact has 0 parseable test results. ` +
+      `Tried Allure raw (${allureRawCandidates} *-result.json candidates), ` +
+      `Allure built-report (data/test-cases/*.json), and JUnit XML. ` +
+      `Sample of zip entries: [${sample.join(', ')}]` +
+      (entries.length > sample.length ? ` (… +${entries.length - sample.length} more)` : ''),
+    );
+
+    return [];
+  }
+
+  /**
+   * Tier-3 fallback: parse JUnit/XUnit-style XML test result files.
+   * Looks at any `*.xml` entry and tries to extract `<testcase>` elements
+   * from `<testsuite>` / `<testsuites>` wrappers. Per-test status is derived
+   * from `<failure>` / `<error>` / `<skipped>` children.
+   */
+  private extractJUnitXml(zip: AdmZip): AllureResult[] {
+    const results: AllureResult[] = [];
+    let candidates = 0;
+    for (const entry of zip.getEntries()) {
+      if (entry.isDirectory || !entry.entryName.toLowerCase().endsWith('.xml')) continue;
+      candidates++;
+      try {
+        const xml = entry.getData().toString('utf8');
+        // Cheap pre-check before invoking the full parser — if the file
+        // doesn't even mention testcase, skip without paying parse cost.
+        if (!/\<testcase\b/i.test(xml)) continue;
+        const parsed = this.junitXmlParser.parse(xml);
+        const suites = this.collectJUnitSuites(parsed);
+        for (const suite of suites) {
+          const suiteName = (suite['@_name'] as string | undefined) ?? '';
+          const testcases = this.toArrayUnknown(suite.testcase);
+          for (const tc of testcases) {
+            results.push(this.parseJUnitTestCase(tc as Record<string, unknown>, suiteName));
+          }
+        }
+      } catch (error) {
+        this.logger.debug(
+          `Skipping malformed JUnit XML ${entry.entryName}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (candidates > 0 && results.length === 0) {
+      this.logger.debug(`  Scanned ${candidates} XML file(s) but found no JUnit <testcase> elements.`);
+    }
+    return results;
+  }
+
+  /** Extract testsuite nodes from either <testsuites> or top-level <testsuite>. */
+  private collectJUnitSuites(parsed: Record<string, unknown>): Array<Record<string, unknown>> {
+    const out: Array<Record<string, unknown>> = [];
+    if (parsed.testsuites) {
+      const wrapper = parsed.testsuites as Record<string, unknown>;
+      out.push(...this.toArrayUnknown<Record<string, unknown>>(wrapper.testsuite));
+    }
+    if (parsed.testsuite) {
+      out.push(...this.toArrayUnknown<Record<string, unknown>>(parsed.testsuite));
+    }
+    return out;
+  }
+
+  private parseJUnitTestCase(tc: Record<string, unknown>, suiteName: string): AllureResult {
+    const name = (tc['@_name'] as string) ?? '';
+    const classname = (tc['@_classname'] as string) ?? '';
+    const timeSeconds = parseFloat((tc['@_time'] as string) || '0');
+    const durationMs = Math.round(timeSeconds * 1000);
+
+    let status: AllureResult['status'] = 'PASSED';
+    let errorMessage: string | undefined;
+    let stackTrace: string | undefined;
+    if (tc.failure) {
+      status = 'FAILED';
+      const failure = this.firstOrSelfUnknown(tc.failure);
+      errorMessage = (failure as Record<string, unknown>)['@_message'] as string | undefined;
+      stackTrace = this.extractTextUnknown(failure);
+    } else if (tc.error) {
+      status = 'ERROR';
+      const error = this.firstOrSelfUnknown(tc.error);
+      errorMessage = (error as Record<string, unknown>)['@_message'] as string | undefined;
+      stackTrace = this.extractTextUnknown(error);
+    } else if (tc.skipped !== undefined) {
+      status = 'SKIPPED';
+    }
+
+    // Synthesize an Allure-shape result so the rest of the pipeline (TestRail
+    // extraction, dedup, retry detection) treats JUnit results uniformly.
+    // We pretend each JUnit testcase is its own variant — historyId derived
+    // from (classname, name, time) is stable per execution.
+    const fullName = classname ? `${classname}.${name}` : name;
+    const historyId = `junit:${fullName}:${timeSeconds}`;
+    const synthJson: AllureResultJson = {
+      uuid: undefined,
+      historyId,
+      name,
+      fullName,
+      status: status === 'PASSED' ? 'passed'
+        : status === 'FAILED' ? 'failed'
+        : status === 'ERROR' ? 'broken'
+        : 'skipped',
+      statusDetails: errorMessage || stackTrace ? { message: errorMessage, trace: stackTrace } : undefined,
+      labels: suiteName ? [{ name: 'suite', value: suiteName }] : [],
+    };
+    const r = this.parseAllureResult(synthJson);
+    // Override durationMs since JUnit gives us total time directly (synthJson
+    // had no start/stop).
+    r.durationMs = durationMs > 0 ? durationMs : r.durationMs;
+    // testExternalId fallback handled by mapAllureToTestRun, but we also
+    // surface a class+method id when nothing else identifies the test.
+    return r;
+  }
+
+  private extractTextUnknown(node: unknown): string | undefined {
+    if (typeof node === 'string') return node.trim() || undefined;
+    if (node && typeof node === 'object') {
+      const text = (node as Record<string, unknown>)['#text'];
+      if (typeof text === 'string') return text.trim() || undefined;
+    }
+    return undefined;
+  }
+
+  private firstOrSelfUnknown(value: unknown): unknown {
+    return Array.isArray(value) ? value[0] : value;
+  }
+
+  private toArrayUnknown<T = unknown>(value: unknown): T[] {
+    if (value === undefined || value === null) return [];
+    return Array.isArray(value) ? (value as T[]) : ([value as T]);
+  }
+
+  /**
+   * Parse the built-report JSON layout: `data/test-cases/<uuid>.json` files
+   * inside an `allure generate` output. Each file has a different shape
+   * from the raw result — `name`, `status`, `time: { duration }`,
+   * `links: [{type, name, url}]`, `extra: { tags: [...] }` etc.
+   */
+  private extractBuiltAllureReport(zip: AdmZip): AllureResult[] {
+    interface BuiltAllureTestCase {
+      uid?: string;
+      historyId?: string;
+      name?: string;
+      fullName?: string;
+      status?: string;
+      time?: { duration?: number };
+      statusMessage?: string;
+      statusTrace?: string;
+      links?: Array<{ name?: string; url?: string; type?: string }>;
+      labels?: Array<{ name: string; value: string }>;
+      parameters?: Array<{ name?: string; value?: string }>;
+      extra?: { tags?: string[] };
+    }
+
+    const results: AllureResult[] = [];
+    for (const entry of zip.getEntries()) {
+      if (entry.isDirectory) continue;
+      // Match `data/test-cases/<anything>.json` anywhere inside the zip.
+      // Some generators include a top-level dir prefix like
+      // `allure-report/data/test-cases/...`.
+      if (!/(?:^|\/)data\/test-cases\/[^/]+\.json$/.test(entry.entryName)) continue;
+      try {
+        const content = entry.getData().toString('utf8');
+        const tc = JSON.parse(content) as BuiltAllureTestCase;
+        // Synthesize a raw-shape AllureResultJson so parseAllureResult can
+        // reuse all the TestRailId-extraction logic.
+        const synthLabels = (tc.labels ?? []).slice();
+        for (const t of tc.extra?.tags ?? []) synthLabels.push({ name: 'tag', value: t });
+        const json: AllureResultJson = {
+          uuid: tc.uid,
+          historyId: tc.historyId,
+          name: tc.name ?? '',
+          fullName: tc.fullName,
+          status: tc.status ?? 'unknown',
+          statusDetails: (tc.statusMessage || tc.statusTrace)
+            ? { message: tc.statusMessage, trace: tc.statusTrace }
+            : undefined,
+          labels: synthLabels,
+          links: tc.links,
+          parameters: tc.parameters,
+          // Synthesize start/stop so durationMs comes through.
+          start: 0,
+          stop: tc.time?.duration ?? 0,
+        };
+        results.push(this.parseAllureResult(json));
+      } catch (error) {
+        this.logger.debug(
+          `Skipping malformed built-report entry ${entry.entryName}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
     return results;
   }
 
   private parseAllureResult(json: AllureResultJson): AllureResult {
-    // Extract TestRailId from tag labels (e.g., { name: "tag", value: "TestRailId:C3538" })
+    // Extract TestRailId from any of:
+    //   - { name: 'tag', value: 'TestRailId:C3538' }       (existing custom convention)
+    //   - { name: 'tag', value: 'C3538' }                  (bare TestRail ID tag, REQUIRES C/CC/Cyrillic-С prefix)
+    //   - { name: 'tms', value: 'C3538' | '3538' }         (Allure @TmsLink — bare numeric allowed, field is ID-typed)
+    //   - { name: 'as_id' / 'allure-id', value: '3538' }   (Allure @AllureId — bare numeric allowed)
+    //   - links[]: { type: 'tms', name: 'C3538' | url: '.../C3538' }
+    //   - the test name / fullName (e.g. "C3538: Verify ...") — REQUIRES C-prefix
+    //
+    // Validation rules (Codex review): generic `tag` and the name fallback
+    // must require an explicit `C`/`CC`/Cyrillic-`С` prefix so that plain
+    // numeric tags like `2026` (e.g. a sprint or year tag) are not accidentally
+    // promoted to TestRail IDs. Explicit ID-typed fields (`tms`, `as_id`,
+    // links[type=tms]) carry ID semantics and may use a bare numeric value,
+    // but the captured token still has to be purely digits — `JIRA-123` must
+    // not normalize to `123`.
     let testRailId: string | undefined;
     let suiteName: string | undefined;
 
-    for (const label of json.labels ?? []) {
-      if (label.name === 'tag' && label.value?.startsWith('TestRailId:')) {
-        // Extract numeric ID from "TestRailId:C3538". Strip all leading
-        // non-digit chars — handles ASCII "C", Cyrillic "С" (U+0421), and
-        // doubled prefixes like "CC3538".
-        const rawId = label.value.substring('TestRailId:'.length);
-        testRailId = rawId.replace(/^\D+/, '');
+    /** Accepts a `C`/`CC`/Cyrillic-`С` prefixed token, strips the prefix. */
+    const setPrefixed = (raw: string | undefined) => {
+      if (testRailId || !raw) return;
+      const m = raw.trim().match(/^(?:CC|[CС])(\d{2,})$/);
+      if (m) testRailId = m[1];
+    };
+
+    /**
+     * Accepts an ID-typed field's value (e.g. tms / as_id / links[type=tms]).
+     * Allows either a `C`-prefixed token or a bare numeric — these fields
+     * already advertise ID semantics so `4570` is meaningful.
+     */
+    const setFromIdField = (raw: string | undefined) => {
+      if (testRailId || !raw) return;
+      const trimmed = raw.trim();
+      const prefixed = trimmed.match(/^(?:CC|[CС])(\d{2,})$/);
+      if (prefixed) {
+        testRailId = prefixed[1];
+        return;
       }
-      if (label.name === 'suite' && label.value) {
-        suiteName = label.value;
+      if (/^\d{2,}$/.test(trimmed)) testRailId = trimmed;
+    };
+
+    for (const label of json.labels ?? []) {
+      const name = label.name?.toLowerCase();
+      const value = label.value;
+      if (!value) continue;
+      if (name === 'tag') {
+        if (value.startsWith('TestRailId:')) {
+          // The custom `TestRailId:` prefix already advertises ID intent — the
+          // value after it may be `C4570` or just `4570`.
+          setFromIdField(value.substring('TestRailId:'.length));
+        } else {
+          // Generic tag — only accept C-prefixed tokens to avoid false
+          // matches on year/sprint/etc. numeric tags.
+          setPrefixed(value);
+        }
+      } else if (name === 'tms' || name === 'testid' || name === 'as_id' || name === 'allure_id' || name === 'allure-id') {
+        setFromIdField(value);
+      } else if (name === 'suite') {
+        suiteName = value;
       }
     }
 
+    if (!testRailId) {
+      for (const link of json.links ?? []) {
+        if (link.type?.toLowerCase() !== 'tms') continue;
+        // Prefer the explicit name; fall back to the trailing path segment of
+        // the URL. Both must be a C-prefixed or bare-numeric ID token —
+        // `https://jira.example/browse/JIRA-456` should NOT match.
+        if (link.name) setFromIdField(link.name);
+        if (!testRailId && link.url) {
+          const tail = link.url.split(/[/?#]/).filter(Boolean).pop();
+          setFromIdField(tail);
+        }
+      }
+    }
+
+    if (!testRailId) {
+      // Last-resort: scan the test name / fullName for a stand-alone "C\d+"
+      // (or Cyrillic equivalent) token. The C prefix is required here too —
+      // bare numeric tokens in test titles are too ambiguous to trust.
+      const haystacks = [json.name, json.fullName].filter(Boolean) as string[];
+      for (const text of haystacks) {
+        const m = text.match(/(?:^|[^a-zA-Z0-9])(?:CC|[CС])(\d{3,})(?=$|[^a-zA-Z0-9])/);
+        if (m) {
+          // Already a digits-only capture group; assign directly so we don't
+          // re-validate against the prefixed regex.
+          testRailId = m[1];
+          break;
+        }
+      }
+    }
+
+    // Built Allure reports synthesize start=0 / stop=duration, so a falsy
+    // `start` is valid. Use type-aware checks to compute the difference
+    // when both are numeric.
     const durationMs =
-      json.start && json.stop ? json.stop - json.start : undefined;
+      typeof json.start === 'number' && typeof json.stop === 'number'
+        ? Math.max(json.stop - json.start, 0)
+        : undefined;
+
+    // Stable fingerprint of test parameters (data-driven row) — used as
+    // part of the dedup-key fallback when Allure's `historyId` is absent.
+    // We sort by parameter name first so different ordering doesn't change
+    // the fingerprint.
+    const parameters = json.parameters ?? [];
+    const parametersFingerprint = parameters.length === 0
+      ? undefined
+      : parameters
+          .map((p) => `${p.name ?? ''}=${p.value ?? ''}`)
+          .sort()
+          .join('|');
 
     return {
       name: json.name,
+      fullName: json.fullName,
+      historyId: json.historyId,
+      parametersFingerprint,
       status: this.mapAllureStatus(json.status),
       testRailId,
       suiteName,
       durationMs,
       errorMessage: json.statusDetails?.message,
       stackTrace: json.statusDetails?.trace,
+      startedAt: typeof json.start === 'number' ? json.start : undefined,
     };
   }
 
@@ -497,20 +1195,59 @@ export class GitHubConnector implements IQODConnector {
     const updatedAt = new Date(run.updated_at);
     const durationMs = updatedAt.getTime() - startedAt.getTime();
 
-    // Group retry attempts by externalId so we can detect within-run flakiness.
-    // A test that flipped between PASSED and FAILED inside the same run is
-    // flaky by definition; squashing it to PASSED (the previous behaviour) hid
-    // the signal entirely from the Flaky Tests widget.
-    const attemptsByExternalId = new Map<string, AllureResult[]>();
+    // Group retry attempts by Allure's `historyId` (or a deterministic
+    // fallback). Allure assigns the same historyId to every attempt of the
+    // *same* test variant (i.e. retries of `methodName` with the same
+    // parameters), but a *different* historyId to each parametrized variant.
+    // The previous key — `testRailId || generateTestId(name, suite)` —
+    // collapsed every parametrized variant of a test method into ONE result
+    // because all variants share the same `@TmsLink` and have identical
+    // `name`. A 2 000-test workflow with 100 methods × 20 parameters
+    // therefore showed up as ~100 results in Run History; this fix keeps
+    // them as 2 000.
+    const dedupKey = (r: AllureResult): string => {
+      if (r.historyId) return `h:${r.historyId}`;
+      // Fallback when Allure data lacks historyId — combine the most
+      // distinguishing fields we have. Real-world Allure always emits
+      // historyId, so this branch is mostly defensive.
+      // Codex review: include `suiteName` when `fullName` is missing so two
+      // unrelated tests with the same `name` in different suites don't
+      // collapse to one group under older / custom Allure adapters.
+      const baseName = r.fullName ?? (r.suiteName ? `${r.suiteName}::${r.name}` : r.name);
+      const variantKey = `${baseName}::${r.parametersFingerprint ?? ''}`;
+      // Including testRailId lets us still merge true retries (same name,
+      // same params) when historyId is absent, while different parametrized
+      // variants (different params) stay distinct.
+      return `f:${r.testRailId ?? ''}::${variantKey}`;
+    };
+
+    const attemptsByGroup = new Map<string, AllureResult[]>();
     for (const r of allureResults) {
-      const externalId = r.testRailId || this.generateTestId(r.name, r.suiteName);
-      const list = attemptsByExternalId.get(externalId);
+      const key = dedupKey(r);
+      const list = attemptsByGroup.get(key);
       if (list) list.push(r);
-      else attemptsByExternalId.set(externalId, [r]);
+      else attemptsByGroup.set(key, [r]);
+    }
+    const rawCount = allureResults.length;
+    const dedupedCount = attemptsByGroup.size;
+    if (rawCount > 0) {
+      this.logger.log(
+        `  Deduplication: ${rawCount} raw Allure results → ${dedupedCount} unique tests` +
+          (rawCount > dedupedCount * 2
+            ? ` (${rawCount - dedupedCount} attempts merged as retries)`
+            : ''),
+      );
     }
 
     const mappedResults: NormalizedTestResult[] = [];
-    for (const [externalId, attempts] of attemptsByExternalId.entries()) {
+    for (const [, attemptsUnsorted] of attemptsByGroup.entries()) {
+      // Order attempts by Allure's `start` so retryIndex reflects execution
+      // order (retries can arrive in any zip order).
+      const attempts = [...attemptsUnsorted].sort((a, b) => {
+        const ax = a.startedAt ?? 0;
+        const bx = b.startedAt ?? 0;
+        return ax - bx;
+      });
       const last = attempts[attempts.length - 1];
       const hasPassed = attempts.some((a) => a.status === 'PASSED');
       const hasFailed = attempts.some((a) => a.status === 'FAILED' || a.status === 'ERROR');
@@ -534,8 +1271,17 @@ export class GitHubConnector implements IQODConnector {
       );
       const carrier = status === 'PASSED' ? last : (failingAttempt ?? last);
 
+      // testExternalId stays keyed on TestRail ID when available so all
+      // parametrized variants of a TmsLink-tagged method link to the SAME
+      // TestRail test_case (multiple test_results per test_case). When
+      // testRailId is absent, fall back to historyId so each variant gets
+      // its own auto-created github-source test_case rather than collapsing.
+      const testExternalId =
+        carrier.testRailId ||
+        (carrier.historyId ? `gh-history-${carrier.historyId}` : this.generateTestId(carrier.name, carrier.suiteName));
+
       mappedResults.push({
-        testExternalId: externalId,
+        testExternalId,
         testTitle: carrier.name,
         testSuiteName: carrier.suiteName,
         status,
@@ -564,6 +1310,17 @@ export class GitHubConnector implements IQODConnector {
         : `(${shardJobs.length} job${shardJobs.length !== 1 ? 's' : ''} passed)`;
     }
 
+    // When no per-test data parsed (artifacts missing / non-standard naming /
+    // expired), fall back to shard/job conclusions so Run History still shows
+    // non-zero counts. Each shard or job is treated as one "execution unit".
+    // This avoids creating synthetic per-shard test_cases while keeping the
+    // pass-rate column meaningful. The countSource field tells consumers
+    // these are CI-level numbers (shards), not test counts.
+    const summaryCounts = mappedResults.length === 0 && shardJobs.length > 0
+      ? this.shardJobsToSummaryCounts(shardJobs)
+      : undefined;
+    const countSource: NormalizedTestRun['countSource'] = summaryCounts ? 'CI_JOBS' : 'TEST_RESULTS';
+
     return {
       externalId: `gh-${run.id}`,
       name: `${run.name} #${run.run_number} ${nameSuffix}`,
@@ -575,6 +1332,58 @@ export class GitHubConnector implements IQODConnector {
       durationMs,
       status: this.mapTestRunStatus(run.status, run.conclusion),
       results: mappedResults,
+      countSource,
+      ...(summaryCounts ? { summaryCounts } : {}),
+    };
+  }
+
+  /**
+   * Derive run-level counts from job conclusions when per-test results are
+   * unavailable. One unit per shard/job; conclusion → status mapping mirrors
+   * mapTestRunStatus so a `cancelled` shard counts as skipped/cancelled, not
+   * passed.
+   */
+  private shardJobsToSummaryCounts(jobs: GitHubJob[]): {
+    totalTests: number;
+    passedCount: number;
+    failedCount: number;
+    skippedCount: number;
+    erroredCount: number;
+  } {
+    let passed = 0;
+    let failed = 0;
+    let skipped = 0;
+    let errored = 0;
+    for (const job of jobs) {
+      switch (job.conclusion) {
+        case 'success':
+          passed++;
+          break;
+        case 'failure':
+          failed++;
+          break;
+        case 'cancelled':
+        case 'skipped':
+        case 'neutral':
+          skipped++;
+          break;
+        case 'timed_out':
+        case 'startup_failure':
+        case 'action_required':
+        case 'stale':
+          errored++;
+          break;
+        default:
+          // null / unknown → treat as failure-like
+          failed++;
+      }
+    }
+    return {
+      totalTests: jobs.length,
+      passedCount: passed,
+      failedCount: failed,
+      skippedCount: skipped,
+      erroredCount: errored,
     };
   }
 
@@ -766,23 +1575,40 @@ interface GitHubArtifact {
 
 interface AllureResultJson {
   uuid?: string;
+  /**
+   * Allure's stable identity for a test variant: hash of (fullName +
+   * parameters). Same across retries of the same parametrized variant,
+   * different across variants. We use this as the dedup key in
+   * mapAllureToTestRun so 2 000 parametrized invocations of 100 methods
+   * stay 2 000 distinct results instead of collapsing to 100.
+   */
+  historyId?: string;
   name: string;
+  fullName?: string;
   status: string;
   statusDetails?: {
     message?: string;
     trace?: string;
   };
   labels?: Array<{ name: string; value: string }>;
+  links?: Array<{ name?: string; url?: string; type?: string }>;
+  /** Test parameters (data-driven row). Used in the dedup-key fallback when historyId is absent. */
+  parameters?: Array<{ name?: string; value?: string }>;
   start?: number;
   stop?: number;
 }
 
 interface AllureResult {
   name: string;
+  fullName?: string;
+  historyId?: string;
+  parametersFingerprint?: string;
   status: 'PASSED' | 'FAILED' | 'SKIPPED' | 'ERROR';
   testRailId?: string;
   suiteName?: string;
   durationMs?: number;
   errorMessage?: string;
   stackTrace?: string;
+  /** Allure's `start` timestamp — used to order retries when computing retryIndex. */
+  startedAt?: number;
 }

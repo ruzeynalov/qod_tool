@@ -11,12 +11,13 @@ import {
   BadRequestException,
   InternalServerErrorException,
   ParseUUIDPipe,
+  HttpCode,
 } from '@nestjs/common';
 import { ConnectorService } from './connector.service';
 import { ConnectorRegistryService } from './connector-registry.service';
 import { CreateConnectorDto } from './dto/create-connector.dto';
 import { UpdateConnectorDto } from './dto/update-connector.dto';
-import { SyncService } from '../sync/sync.service';
+import { SyncSchedulerService } from '../sync/sync-scheduler.service';
 import { AggregationService } from '../aggregation/aggregation.service';
 import { KPIService } from '../kpi/kpi.service';
 import { ProjectAccessGuard } from '../../common/guards/project-access.guard';
@@ -45,7 +46,7 @@ export class ConnectorController {
   constructor(
     private readonly connectorService: ConnectorService,
     private readonly connectorRegistry: ConnectorRegistryService,
-    private readonly syncService: SyncService,
+    private readonly syncScheduler: SyncSchedulerService,
     private readonly aggregationService: AggregationService,
     private readonly kpiService: KPIService,
   ) {}
@@ -160,14 +161,19 @@ export class ConnectorController {
   }
 
   @Post(':id/sync')
+  @HttpCode(202)
   async triggerSync(
-    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('projectId', ParseUUIDPipe) _projectId: string,
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     try {
-      const result = await this.syncService.executeSyncJob(id);
-      await this.aggregationService.runAggregation(projectId);
-      return { success: true, logs: result.logs };
+      const { jobId } = await this.syncScheduler.queueManualSync(id);
+      return {
+        success: true,
+        status: 'queued',
+        jobId,
+        message: 'Sync queued. Connector status will update when the job finishes.',
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new InternalServerErrorException(message);

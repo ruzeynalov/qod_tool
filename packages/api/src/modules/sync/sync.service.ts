@@ -30,6 +30,8 @@ interface SyncCounts {
   errors: SyncError[];
 }
 
+const TEST_RESULT_CREATE_CHUNK_SIZE = 1_000;
+
 /** Maps ConnectorType enum values to source strings used in entities. */
 function connectorTypeToSource(connectorType: string): string {
   return connectorType.toLowerCase().replace(/_/g, '-');
@@ -77,6 +79,14 @@ function countResultStatuses(results: NormalizedTestResult[]) {
     erroredCount: errored,
     flakyCount: flaky,
   };
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
 }
 
 @Injectable()
@@ -296,7 +306,26 @@ export class SyncService {
 
     for (const run of testRuns) {
       try {
-        const resultCounts = countResultStatuses(run.results);
+        // Prefer connector-supplied summaryCounts when per-test results are
+        // empty — e.g. GitHub workflow runs without parseable Allure
+        // artifacts but with shard/job conclusions. Otherwise compute counts
+        // from the actual test_results.
+        const usingSummary = run.results.length === 0 && !!run.summaryCounts;
+        const resultCounts = usingSummary
+          ? {
+              totalTests: run.summaryCounts!.totalTests,
+              passedCount: run.summaryCounts!.passedCount,
+              failedCount: run.summaryCounts!.failedCount,
+              skippedCount: run.summaryCounts!.skippedCount ?? 0,
+              erroredCount: run.summaryCounts!.erroredCount ?? 0,
+              flakyCount: run.summaryCounts!.flakyCount ?? 0,
+            }
+          : countResultStatuses(run.results);
+        // Default to TEST_RESULTS when neither side flagged the row — the
+        // ConnectorService never relied on shard counts before this PR.
+        const countSource = (run.countSource ?? (usingSummary ? 'CI_JOBS' : 'TEST_RESULTS')) as
+          | 'TEST_RESULTS'
+          | 'CI_JOBS';
 
         const existing = existingRunSet.has(run.externalId);
 
@@ -322,6 +351,7 @@ export class SyncService {
             status: run.status,
             isRerun: run.isRerun ?? false,
             source,
+            countSource: countSource as any,
             ...resultCounts,
           },
           update: {
@@ -335,6 +365,7 @@ export class SyncService {
             durationMs: run.durationMs,
             status: run.status,
             isRerun: run.isRerun ?? false,
+            countSource: countSource as any,
             ...resultCounts,
           },
         });
@@ -425,9 +456,11 @@ export class SyncService {
 
         // Batch create all test results
         if (resultDataBatch.length > 0) {
-          await prisma.testResult.createMany({
-            data: resultDataBatch,
-          });
+          for (const chunk of chunkArray(resultDataBatch, TEST_RESULT_CREATE_CHUNK_SIZE)) {
+            await prisma.testResult.createMany({
+              data: chunk,
+            });
+          }
         }
 
         // Mark test cases from automation runs as automated
@@ -905,10 +938,103 @@ export class SyncService {
         addLog(`Fetched ${testCases.length} test cases`);
       }
 
+      let testRunSyncWarning: string | null = null;
       if (connector.fetchTestRuns) {
         addLog(`Fetching test runs from ${connectorType}…`);
         testRuns = await connector.fetchTestRuns(configPayload, since);
         addLog(`Fetched ${testRuns.length} test runs`);
+
+        // Step 5: collect connector-side diagnostics (e.g. GitHub artifact-
+        // name mismatches or matched-but-empty artifacts) and surface them
+        // as a soft warning on the connector status. Hard errors keep using
+        // lastSyncError; this is the "sync ran fine but configuration looks
+        // suspect" channel. Codex review: name-mismatch and matched-but-
+        // empty are tracked as separate counters so the warning text stays
+        // accurate — pointing the user at `artifactPattern` only makes sense
+        // for the name-mismatch case.
+        const diagFn = (connector as { getDiagnostics?: () => unknown }).getDiagnostics;
+        if (typeof diagFn === 'function') {
+          const diag = diagFn.call(connector) as {
+            completedRuns?: number;
+            runsWithoutMatchedArtifacts?: number;
+            runsWithoutParsedResults?: number;
+            runsWithDownloadFailures?: number;
+            runsWithExpiredOnlyArtifacts?: number;
+            sampleUnmatchedArtifactNames?: string[];
+            sampleDownloadErrors?: string[];
+            sampleExpiredArtifactNames?: string[];
+          } | null;
+          if (diag && (diag.completedRuns ?? 0) > 0) {
+            const completed = diag.completedRuns ?? 0;
+            const nameMismatchN = diag.runsWithoutMatchedArtifacts ?? 0;
+            const parseMissN = diag.runsWithoutParsedResults ?? 0;
+            const downloadFailN = diag.runsWithDownloadFailures ?? 0;
+            const expiredOnlyN = diag.runsWithExpiredOnlyArtifacts ?? 0;
+            const parts: string[] = [];
+
+            // Download-failure warning — actionable via token scope or
+            // artifact retention. Codex review: this MUST come before /
+            // separately from the matched-but-empty warning, because
+            // pointing the user at "upload raw Allure" when the real
+            // problem is `403 Forbidden` is misleading. We surface this
+            // even when the connector returned without a hard error
+            // because each artifact failure is caught per-artifact.
+            if (downloadFailN >= 1) {
+              const sample = (diag.sampleDownloadErrors ?? []).slice(0, 3).join(' | ');
+              parts.push(
+                `${downloadFailN}/${completed} runs had artifact download failures` +
+                (sample ? ` (e.g. ${sample})` : '') +
+                `. Common causes: token lacks 'actions:read' (fine-grained PAT) or ` +
+                `'repo' scope (classic PAT); artifact expired (>90d, HTTP 410); or ` +
+                `network policy blocking GitHub Releases blob storage.`,
+              );
+            }
+
+            // Expired-only warning — not fixable via artifactPattern. This
+            // often means the configured workflow is stale (for example a
+            // reusable workflow no longer called directly) or artifact
+            // retention is shorter than the sync window.
+            if (expiredOnlyN > 0 && (expiredOnlyN >= 3 || expiredOnlyN === completed)) {
+              const sample = (diag.sampleExpiredArtifactNames ?? []).slice(0, 5).join(', ');
+              const more = (diag.sampleExpiredArtifactNames?.length ?? 0) > 5 ? ', …' : '';
+              parts.push(
+                `${expiredOnlyN}/${completed} runs had artifacts, but every ` +
+                `artifact on those runs was expired` +
+                (sample ? ` (expired examples: [${sample}${more}])` : '') +
+                `. QOD can only show shard/job fallback counts for those runs. ` +
+                `Check whether the selected workflow is stale or no longer the ` +
+                `parent workflow that uploads current artifacts, or increase ` +
+                `GitHub artifact retention / sync sooner.`,
+              );
+            }
+
+            // Name-mismatch warning — actionable via `artifactPattern`.
+            if (nameMismatchN >= 3 && (diag.sampleUnmatchedArtifactNames?.length ?? 0) > 0) {
+              const sample = diag.sampleUnmatchedArtifactNames!.slice(0, 5).join(', ');
+              const more = diag.sampleUnmatchedArtifactNames!.length > 5 ? ', …' : '';
+              parts.push(
+                `${nameMismatchN}/${completed} runs uploaded artifacts that did not ` +
+                `match the connector pattern (saw [${sample}${more}]). ` +
+                `Configure 'artifactPattern' in connector settings.`,
+              );
+            }
+
+            // Matched-but-empty warning — different fix (workflow contents).
+            if (parseMissN >= 3) {
+              parts.push(
+                `${parseMissN}/${completed} runs had matching artifacts that parsed 0 ` +
+                `test results — likely a malformed file or an unsupported report ` +
+                `layout. Upload raw 'allure-results' (the *-result.json files) or ` +
+                `a generated Allure report with data/test-cases/*.json.`,
+              );
+            }
+
+            if (parts.length > 0) {
+              testRunSyncWarning = parts.join(' ');
+              addLog(`WARNING: ${testRunSyncWarning}`);
+            }
+          }
+        }
       }
 
       if (connector.fetchDefects) {
@@ -1029,6 +1155,9 @@ export class SyncService {
       const updateData: Record<string, any> = {
         status: 'ACTIVE',
         lastSyncError: null,
+        // Persist (or clear) the soft sync warning collected from connector
+        // diagnostics — null means the connector looked healthy this run.
+        lastSyncWarning: testRunSyncWarning,
       };
 
       // Only advance lastSyncAt if we actually fetched data.

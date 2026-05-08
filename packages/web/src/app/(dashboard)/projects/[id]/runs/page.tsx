@@ -475,15 +475,35 @@ function RunHistorySection({ projectId }: { projectId: string }) {
       {
         key: 'totalTests',
         header: 'Tests',
-        render: (row: DemoTestRun) => (
-          <span className="text-xs">
-            <span className="text-rag-green">{row.passedCount}</span>
-            <span className="text-muted"> / </span>
-            <span className="text-rag-red">{row.failedCount}</span>
-            <span className="text-muted"> / </span>
-            <span className="text-secondary">{row.skippedCount}</span>
-          </span>
-        ),
+        render: (row: DemoTestRun) => {
+          // Connector fell back to CI-level counts when no per-test artifact
+          // was parseable. Render them as "shards" with a hint instead of
+          // pretending they are test counts (they are job/shard counts —
+          // typically much smaller than the real test count). The cell
+          // tooltip explains the discrepancy.
+          if (row.countSource === 'CI_JOBS') {
+            const total = row.passedCount + row.failedCount + (row.erroredCount ?? 0) + row.skippedCount;
+            return (
+              <span
+                className="text-xs italic text-muted"
+                title="No per-test results were parsed for this run. Counts shown are CI shard/job conclusions, not test cases. Configure 'artifactPattern' on the connector to point at the real test-result artifact."
+              >
+                {total} shard{total === 1 ? '' : 's'} (no test data)
+              </span>
+            );
+          }
+          // Default: per-test counts. Fold errored into the red bucket so
+          // ERROR-status results still surface as "non-green".
+          return (
+            <span className="text-xs">
+              <span className="text-rag-green">{row.passedCount}</span>
+              <span className="text-muted"> / </span>
+              <span className="text-rag-red">{row.failedCount + (row.erroredCount ?? 0)}</span>
+              <span className="text-muted"> / </span>
+              <span className="text-secondary">{row.skippedCount}</span>
+            </span>
+          );
+        },
       },
       {
         key: 'startedAt',
@@ -607,11 +627,19 @@ function RunHistorySection({ projectId }: { projectId: string }) {
                 <span>{formatRelativeTime(row.startedAt)}</span>
               </div>
               <div className="mt-1 text-xs">
-                <span className="text-rag-green">{row.passedCount}P</span>
-                <span className="text-muted"> · </span>
-                <span className="text-rag-red">{row.failedCount}F</span>
-                <span className="text-muted"> · </span>
-                <span className="text-secondary">{row.skippedCount}S</span>
+                {row.countSource === 'CI_JOBS' ? (
+                  <span className="italic text-muted">
+                    {row.passedCount + row.failedCount + (row.erroredCount ?? 0) + row.skippedCount} shards (no test data)
+                  </span>
+                ) : (
+                  <>
+                    <span className="text-rag-green">{row.passedCount}P</span>
+                    <span className="text-muted"> · </span>
+                    <span className="text-rag-red">{row.failedCount + (row.erroredCount ?? 0)}F</span>
+                    <span className="text-muted"> · </span>
+                    <span className="text-secondary">{row.skippedCount}S</span>
+                  </>
+                )}
               </div>
             </div>
           )}

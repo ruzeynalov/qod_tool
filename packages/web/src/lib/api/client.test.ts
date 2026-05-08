@@ -29,8 +29,11 @@ describe('apiClient', () => {
       method: 'POST',
     });
 
+    // API_BASE defaults to '' (same-origin) in production builds — see
+    // 7565386. Tests run without `NEXT_PUBLIC_API_URL` set so the fetched
+    // URL is just the relative path.
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://localhost:4000/api/v1/notifications/read-all',
+      '/api/v1/notifications/read-all',
       expect.objectContaining({
         method: 'POST',
         headers: { Authorization: 'Bearer test-token' },
@@ -52,7 +55,7 @@ describe('apiClient', () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://localhost:4000/api/v1/projects/project-1/alerts',
+      '/api/v1/projects/project-1/alerts',
       expect.objectContaining({
         headers: { 'Content-Type': 'application/json' },
       }),

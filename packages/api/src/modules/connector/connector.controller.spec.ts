@@ -2,7 +2,7 @@ import { Reflector } from '@nestjs/core';
 import { ConnectorController } from './connector.controller';
 import { ConnectorService } from './connector.service';
 import { ConnectorRegistryService } from './connector-registry.service';
-import { SyncService } from '../sync/sync.service';
+import { SyncSchedulerService } from '../sync/sync-scheduler.service';
 import { AggregationService } from '../aggregation/aggregation.service';
 import { KPIService } from '../kpi/kpi.service';
 import { ROLES_KEY } from '../../common/decorators/roles.decorator';
@@ -51,9 +51,9 @@ function createMockRegistryService() {
   };
 }
 
-function createMockSyncService() {
+function createMockSyncSchedulerService() {
   return {
-    executeSyncJob: vi.fn().mockResolvedValue({ logs: ['synced 10 items'] }),
+    queueManualSync: vi.fn().mockResolvedValue({ jobId: 'manual-job-1' }),
   };
 }
 
@@ -73,21 +73,21 @@ describe('ConnectorController', () => {
   let controller: ConnectorController;
   let connectorService: ReturnType<typeof createMockConnectorService>;
   let registryService: ReturnType<typeof createMockRegistryService>;
-  let syncService: ReturnType<typeof createMockSyncService>;
+  let syncScheduler: ReturnType<typeof createMockSyncSchedulerService>;
   let aggregationService: ReturnType<typeof createMockAggregationService>;
   let kpiService: ReturnType<typeof createMockKPIService>;
 
   beforeEach(() => {
     connectorService = createMockConnectorService();
     registryService = createMockRegistryService();
-    syncService = createMockSyncService();
+    syncScheduler = createMockSyncSchedulerService();
     aggregationService = createMockAggregationService();
     kpiService = createMockKPIService();
 
     controller = new ConnectorController(
       connectorService as unknown as ConnectorService,
       registryService as unknown as ConnectorRegistryService,
-      syncService as unknown as SyncService,
+      syncScheduler as unknown as SyncSchedulerService,
       aggregationService as unknown as AggregationService,
       kpiService as unknown as KPIService,
     );
@@ -148,18 +148,23 @@ describe('ConnectorController', () => {
     );
   });
 
-  it('triggerSync executes sync and runs aggregation', async () => {
+  it('triggerSync queues a manual sync without waiting for the full job', async () => {
     const result = await controller.triggerSync(PROJECT_ID, CONNECTOR_ID);
 
-    expect(syncService.executeSyncJob).toHaveBeenCalledWith(CONNECTOR_ID);
-    expect(aggregationService.runAggregation).toHaveBeenCalledWith(PROJECT_ID);
-    expect(result).toEqual({ success: true, logs: ['synced 10 items'] });
+    expect(syncScheduler.queueManualSync).toHaveBeenCalledWith(CONNECTOR_ID);
+    expect(aggregationService.runAggregation).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      success: true,
+      status: 'queued',
+      jobId: 'manual-job-1',
+      message: 'Sync queued. Connector status will update when the job finishes.',
+    });
   });
 
-  it('triggerSync throws on sync failure', async () => {
-    syncService.executeSyncJob.mockRejectedValueOnce(new Error('Connection timeout'));
+  it('triggerSync throws when queueing the manual sync fails', async () => {
+    syncScheduler.queueManualSync.mockRejectedValueOnce(new Error('Redis timeout'));
 
-    await expect(controller.triggerSync(PROJECT_ID, CONNECTOR_ID)).rejects.toThrow('Connection timeout');
+    await expect(controller.triggerSync(PROJECT_ID, CONNECTOR_ID)).rejects.toThrow('Redis timeout');
   });
 
   it('exportAll returns decrypted connector configs', async () => {

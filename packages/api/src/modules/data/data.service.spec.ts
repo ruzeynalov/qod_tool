@@ -345,6 +345,7 @@ describe('DataService', () => {
       failedCount: 3,
       skippedCount: 2,
       flakyCount: 1,
+      erroredCount: 0,
       pipelineRunId: 'pipe-1',
       isRerun: false,
       originalRunId: null,
@@ -443,6 +444,48 @@ describe('DataService', () => {
 
       expect(result.items).toEqual([]);
       expect(result.totalPages).toBe(0);
+    });
+
+    it('exposes erroredCount so the UI can fold it into the failed bucket', async () => {
+      // The Run History "Tests" column was previously rendering 0/0/0 for
+      // shard-only runs whose summaryCounts populated `erroredCount` only
+      // (timed_out / startup_failure shards). The API must now return
+      // `erroredCount` alongside the other counts.
+      const run = makeRun('run-errored', {
+        passedCount: 0,
+        failedCount: 0,
+        skippedCount: 0,
+        erroredCount: 3,
+      });
+      prisma.testRun.findMany.mockResolvedValue([run]);
+      prisma.testRun.count.mockResolvedValue(1);
+
+      const result = await service.getTestRuns(projectId, {});
+      expect(result.items[0].erroredCount).toBe(3);
+    });
+
+    it('exposes countSource so the UI can label CI_JOBS rows differently from real test counts', async () => {
+      // Without this, the Run History UI cannot tell shard-fallback runs
+      // (15 shards passed) apart from real per-test runs (15 tests).
+      const run = makeRun('run-cijobs', { countSource: 'CI_JOBS' });
+      prisma.testRun.findMany.mockResolvedValue([run]);
+      prisma.testRun.count.mockResolvedValue(1);
+
+      const result = await service.getTestRuns(projectId, {});
+      expect(result.items[0].countSource).toBe('CI_JOBS');
+    });
+
+    it('defaults countSource to TEST_RESULTS when the column is absent (legacy rows)', async () => {
+      // Pre-migration test_runs rows might be missing countSource entirely.
+      // The API must default them to TEST_RESULTS so the UI does not
+      // suddenly start labelling old per-test runs as shards.
+      const run = makeRun('run-legacy', {});
+      delete (run as any).countSource;
+      prisma.testRun.findMany.mockResolvedValue([run]);
+      prisma.testRun.count.mockResolvedValue(1);
+
+      const result = await service.getTestRuns(projectId, {});
+      expect(result.items[0].countSource).toBe('TEST_RESULTS');
     });
   });
 
@@ -813,7 +856,36 @@ describe('DataService', () => {
       expect(result[1].runId).toBe('run-1');
     });
 
-    it('should deduplicate multiple results for the same run', async () => {
+    it('should aggregate multiple results for the same run by status severity', async () => {
+      // Codex review: when the GitHub connector emits many test_result rows
+      // for one (run, test_case) — the parametrized-variants case, where 20
+      // variants of a TmsLink-tagged method all link to the same TestRail
+      // case — the drawer must show ONE row per run with the worst status.
+      // Previous behaviour ("first encountered wins") was order-dependent
+      // and could swallow a single failed variant in 19 passing ones.
+      const d1 = new Date('2026-03-01');
+      const results = [
+        makeHistoryResult('run-1', d1, { status: 'PASSED' }),
+        makeHistoryResult('run-1', d1, { status: 'FAILED', errorMessage: 'variant 7 failed' }),
+        makeHistoryResult('run-1', d1, { status: 'PASSED' }),
+      ];
+      prisma.testResult.findMany.mockResolvedValue(results);
+
+      const result = await service.getTestCaseHistory(projectId, testCaseId);
+
+      expect(result).toHaveLength(1);
+      // Severity ladder: FAILED beats PASSED so a single failure in many
+      // variants surfaces as the run-level status.
+      expect(result[0].status).toBe('FAILED');
+      expect(result[0].errorMessage).toBe('variant 7 failed');
+      // New aggregate fields expose how many variants ran in this run.
+      expect((result[0] as any).variantsCount).toBe(3);
+      expect((result[0] as any).passedCount).toBe(2);
+      expect((result[0] as any).failedCount).toBe(1);
+    });
+
+    it('aggregates regardless of DB row ordering (severity ladder is stable)', async () => {
+      // Same scenario, opposite arrival order. Result must be the same.
       const d1 = new Date('2026-03-01');
       const results = [
         makeHistoryResult('run-1', d1, { status: 'FAILED' }),
@@ -824,7 +896,7 @@ describe('DataService', () => {
       const result = await service.getTestCaseHistory(projectId, testCaseId);
 
       expect(result).toHaveLength(1);
-      expect(result[0].status).toBe('FAILED'); // first encountered wins
+      expect(result[0].status).toBe('FAILED');
     });
 
     it('should limit to 50 entries', async () => {
@@ -936,6 +1008,30 @@ describe('DataService', () => {
       const result = await service.getPassRateTrend(projectId, 30);
 
       expect(result).toHaveLength(5);
+    });
+
+    it('excludes CI_JOBS-source runs from test-total math', async () => {
+      // Shard-fallback runs hold shard counts, not test counts. Including
+      // them in `total`/`passed` would say a "15-shard PASSED workflow"
+      // contributed 15 tests at 100% pass rate, distorting the day's
+      // average whenever a real test-result run had a different rate.
+      const runs = [
+        // Real per-test run: 100 total, 90 passed → 90% pass rate.
+        { startedAt: new Date('2026-03-01T10:00:00Z'), status: 'PASSED', totalTests: 100, passedCount: 90, countSource: 'TEST_RESULTS' },
+        // Shard-fallback run: 15 shards passed — must NOT contribute 15 / 15.
+        { startedAt: new Date('2026-03-01T11:00:00Z'), status: 'PASSED', totalTests: 15, passedCount: 15, countSource: 'CI_JOBS' },
+      ];
+      prisma.testRun.findMany.mockResolvedValue(runs);
+
+      const result = await service.getPassRateTrend(projectId, 30);
+      const day = result.find((r) => r.date === '2026-03-01');
+      expect(day).toBeDefined();
+      expect(day!.totalTests).toBe(100); // CI_JOBS row excluded
+      expect(day!.passRate).toBe(90); // 90/100 → 90% (would be 105/115 = 91.3% if CI_JOBS were included)
+      // Run-level counters keep both rows — Run Health still reflects the
+      // workflow-level pass status of the shard-fallback run.
+      expect(day!.totalRuns).toBe(2);
+      expect(day!.passedRuns).toBe(2);
     });
 
     it('counts ERRORED and CANCELLED runs in failedRuns', async () => {

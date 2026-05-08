@@ -323,6 +323,37 @@ describe('SyncService', () => {
       });
     });
 
+    it('should chunk large test result batches', async () => {
+      const results = Array.from({ length: 1001 }, (_, i) => ({
+        testExternalId: `TC-${i}`,
+        testTitle: `Test ${i}`,
+        status: 'PASSED' as const,
+        durationMs: 100,
+      }));
+      const testRuns: NormalizedTestRun[] = [{
+        ...sampleTestRuns()[0],
+        results,
+      }];
+
+      prisma.testCase.findMany.mockResolvedValue(
+        results.map((r, i) => ({
+          id: `tc-uuid-${i}`,
+          externalId: r.testExternalId,
+          source: SOURCE,
+          automationStatus: 'AUTOMATED',
+        })),
+      );
+      prisma.testRun.upsert.mockResolvedValue({ id: 'run-uuid' });
+      prisma.testResult.createMany.mockResolvedValue({ count: 1000 });
+      prisma.testResult.deleteMany.mockResolvedValue({ count: 0 });
+
+      await service.syncTestRuns(PROJECT_ID, CONNECTOR_CONFIG_ID, testRuns, SOURCE);
+
+      expect(prisma.testResult.createMany).toHaveBeenCalledTimes(2);
+      expect(prisma.testResult.createMany.mock.calls[0][0].data).toHaveLength(1000);
+      expect(prisma.testResult.createMany.mock.calls[1][0].data).toHaveLength(1);
+    });
+
     it('should handle empty results array', async () => {
       const result = await service.syncTestRuns(PROJECT_ID, CONNECTOR_CONFIG_ID, [], SOURCE);
 
@@ -373,6 +404,108 @@ describe('SyncService', () => {
       expect(runCall.create.totalTests).toBe(2);
       expect(runCall.create.passedCount).toBe(1);
       expect(runCall.create.failedCount).toBe(1);
+    });
+
+    it('uses connector-supplied summaryCounts when results array is empty', async () => {
+      // Repro for "(15 shards passed) → 0/0/0" — when the GitHub connector
+      // can't parse Allure but supplies shard-derived counts, the test_run
+      // row should reflect those counts instead of all zeros.
+      const testRuns: NormalizedTestRun[] = [
+        {
+          externalId: 'RUN-noart',
+          name: 'CI Run #100 (15 shards passed)',
+          triggerType: 'CI_PUSH',
+          branch: 'develop',
+          startedAt: new Date('2026-04-26T10:00:00Z'),
+          status: 'PASSED',
+          results: [],
+          countSource: 'CI_JOBS',
+          summaryCounts: {
+            totalTests: 15,
+            passedCount: 15,
+            failedCount: 0,
+            skippedCount: 0,
+            erroredCount: 0,
+          },
+        },
+      ];
+
+      prisma.testCase.findMany.mockResolvedValue([]);
+      prisma.testRun.upsert.mockResolvedValue({ id: 'run-noart' });
+      prisma.testResult.deleteMany.mockResolvedValue({ count: 0 });
+
+      await service.syncTestRuns(PROJECT_ID, CONNECTOR_CONFIG_ID, testRuns, SOURCE);
+
+      const runCall = prisma.testRun.upsert.mock.calls[0][0];
+      expect(runCall.create.totalTests).toBe(15);
+      expect(runCall.create.passedCount).toBe(15);
+      expect(runCall.create.failedCount).toBe(0);
+      // countSource persisted so downstream readers can label this row as
+      // shard-level rather than test-level.
+      expect(runCall.create.countSource).toBe('CI_JOBS');
+      expect(runCall.update.countSource).toBe('CI_JOBS');
+      // No test_results created because results array is empty
+      expect(prisma.testResult.createMany).not.toHaveBeenCalled();
+    });
+
+    it('persists countSource=TEST_RESULTS for normal per-test runs', async () => {
+      // Defensive: when the connector emits real per-test results, the run
+      // row must record TEST_RESULTS so getPassRateTrend's test-total math
+      // includes it (CI_JOBS rows are excluded).
+      const testRuns = sampleTestRuns();
+
+      prisma.testCase.findMany.mockResolvedValue([
+        { id: 'tc-uuid', externalId: 'TC-1', source: SOURCE, automationStatus: 'AUTOMATED' },
+        { id: 'tc-uuid-2', externalId: 'TC-2', source: SOURCE, automationStatus: 'AUTOMATED' },
+      ]);
+      prisma.testRun.upsert.mockResolvedValue({ id: 'run-uuid' });
+      prisma.testResult.createMany.mockResolvedValue({ count: 2 });
+      prisma.testResult.deleteMany.mockResolvedValue({ count: 0 });
+
+      await service.syncTestRuns(PROJECT_ID, CONNECTOR_CONFIG_ID, testRuns, SOURCE);
+
+      const runCall = prisma.testRun.upsert.mock.calls[0][0];
+      expect(runCall.create.countSource).toBe('TEST_RESULTS');
+      expect(runCall.update.countSource).toBe('TEST_RESULTS');
+    });
+
+    it('ignores summaryCounts when results array is non-empty (per-test data wins)', async () => {
+      const testRuns: NormalizedTestRun[] = [
+        {
+          externalId: 'RUN-with-results',
+          name: 'CI Run #101',
+          triggerType: 'CI_PUSH',
+          branch: 'develop',
+          startedAt: new Date('2026-04-26T10:00:00Z'),
+          status: 'PASSED',
+          results: [
+            {
+              testExternalId: 'TC-1',
+              testTitle: 'Login',
+              status: 'PASSED',
+            },
+          ],
+          // Misleading summaryCounts — these MUST be ignored when results exist.
+          summaryCounts: {
+            totalTests: 999,
+            passedCount: 999,
+            failedCount: 0,
+          },
+        },
+      ];
+
+      prisma.testCase.findMany.mockResolvedValue([
+        { id: 'tc-uuid', externalId: 'TC-1', source: SOURCE, automationStatus: 'AUTOMATED' },
+      ]);
+      prisma.testRun.upsert.mockResolvedValue({ id: 'run-with-results' });
+      prisma.testResult.createMany.mockResolvedValue({ count: 1 });
+      prisma.testResult.deleteMany.mockResolvedValue({ count: 0 });
+
+      await service.syncTestRuns(PROJECT_ID, CONNECTOR_CONFIG_ID, testRuns, SOURCE);
+
+      const runCall = prisma.testRun.upsert.mock.calls[0][0];
+      expect(runCall.create.totalTests).toBe(1);
+      expect(runCall.create.passedCount).toBe(1);
     });
   });
 
@@ -622,6 +755,41 @@ describe('SyncService', () => {
       });
       expect(lastCall?.data).not.toHaveProperty('lastSyncAt');
       expect(lastCall?.data).not.toHaveProperty('syncCursor');
+    });
+
+    it('persists a stale-workflow warning when selected workflow artifacts are expired-only', async () => {
+      const config = makeConnectorConfig();
+      const connector = makeMockConnector({
+        fetchTestRuns: vi.fn().mockResolvedValue([]),
+      }) as IQODConnector & { getDiagnostics: ReturnType<typeof vi.fn> };
+      connector.getDiagnostics = vi.fn().mockReturnValue({
+        completedRuns: 5,
+        runsWithoutMatchedArtifacts: 0,
+        runsWithoutParsedResults: 0,
+        runsWithDownloadFailures: 0,
+        runsWithExpiredOnlyArtifacts: 4,
+        sampleUnmatchedArtifactNames: [],
+        sampleDownloadErrors: [],
+        sampleExpiredArtifactNames: [
+          'allure-results-shard-1',
+          'allure-report-shard-1',
+        ],
+      });
+
+      prisma.connectorConfig.findUniqueOrThrow.mockResolvedValue(config);
+      registry.get.mockReturnValue(connector);
+      prisma.connectorConfig.update.mockResolvedValue({});
+
+      await service.executeSyncJob(CONNECTOR_CONFIG_ID);
+
+      const lastCall = prisma.connectorConfig.update.mock.calls.at(-1)?.[0];
+      expect(lastCall?.data.lastSyncWarning).toContain(
+        '4/5 runs had artifacts, but every artifact on those runs was expired',
+      );
+      expect(lastCall?.data.lastSyncWarning).toContain(
+        'selected workflow is stale',
+      );
+      expect(lastCall?.data.lastSyncWarning).not.toContain('artifactPattern');
     });
 
     it('should set status to ACTIVE and advance lastSyncAt when data is fetched', async () => {

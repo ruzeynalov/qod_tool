@@ -194,6 +194,37 @@ describe('SyncSchedulerService', () => {
     });
   });
 
+  // ── queueManualSync ─────────────────────────────────────────────
+
+  describe('queueManualSync', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-08T04:00:00Z'));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('should enqueue a one-off manual sync job and return its job id', async () => {
+      mockQueue.add.mockResolvedValueOnce({ id: 'manual-job-1' });
+
+      const result = await service.queueManualSync('conn-1');
+
+      expect(mockQueue.add).toHaveBeenCalledWith(
+        'manual-sync',
+        { connectorConfigId: 'conn-1' },
+        {
+          jobId: `manual-sync-conn-1-${new Date('2026-05-08T04:00:00Z').getTime()}`,
+          removeOnComplete: true,
+          removeOnFail: false,
+          attempts: 1,
+        },
+      );
+      expect(result).toEqual({ jobId: 'manual-job-1' });
+    });
+  });
+
   // ── removeConnectorSchedule ─────────────────────────────────────
 
   describe('removeConnectorSchedule', () => {
