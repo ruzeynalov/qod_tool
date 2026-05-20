@@ -31,6 +31,7 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 const TOKEN_KEY = 'qod-auth-token';
 const USER_KEY = 'qod-auth-user';
+const DEMO_MODE_KEY = 'qod-demo-mode';
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
@@ -57,6 +58,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(newUser);
     localStorage.setItem(TOKEN_KEY, newToken);
     localStorage.setItem(USER_KEY, JSON.stringify(newUser));
+    // Real sign-in always exits demo mode — otherwise apiClient keeps stripping
+    // Authorization headers and authenticated requests silently 401.
+    localStorage.setItem(DEMO_MODE_KEY, 'false');
     queryClient.clear();
   }, [queryClient]);
 
