@@ -29,7 +29,10 @@ export async function apiClient<T>(
 
   if (!res.ok) {
     if (res.status === 401) {
-      if (typeof window !== 'undefined') {
+      // Demo mode uses client-side data; a stale token must not force logout.
+      const inDemoMode =
+        typeof window !== 'undefined' && localStorage.getItem('qod-demo-mode') === 'true';
+      if (!inDemoMode && typeof window !== 'undefined') {
         localStorage.removeItem('qod-auth-token');
         localStorage.removeItem('qod-auth-user');
         window.location.href = '/login';

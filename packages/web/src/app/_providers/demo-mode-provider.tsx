@@ -5,14 +5,20 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
 } from 'react';
 import { useRouter } from 'next/navigation';
+import { useQueryClient } from '@tanstack/react-query';
+
+const TOKEN_KEY = 'qod-auth-token';
 
 interface DemoModeContextValue {
   demoMode: boolean;
+  /** False until localStorage has been read — AuthGate must wait to avoid a login redirect flash. */
+  hydrated: boolean;
   toggleDemoMode: () => void;
   setDemoMode: (enabled: boolean) => void;
 }
@@ -23,29 +29,35 @@ const STORAGE_KEY = 'qod-demo-mode';
 
 export function DemoModeProvider({ children }: { children: ReactNode }) {
   const [demoMode, setDemoModeState] = useState(false);
-  const [mounted, setMounted] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
   const prevDemoMode = useRef<boolean | null>(null);
   const router = useRouter();
+  const queryClient = useQueryClient();
 
-  useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === 'true') {
-      setDemoModeState(true);
-    }
-    // If nothing stored, default to false (require login)
-    setMounted(true);
+  useLayoutEffect(() => {
+    setDemoModeState(localStorage.getItem(STORAGE_KEY) === 'true');
+    setHydrated(true);
   }, []);
 
   useEffect(() => {
-    if (!mounted) return;
+    if (!hydrated) return;
     localStorage.setItem(STORAGE_KEY, String(demoMode));
 
-    // Navigate to home when demo mode is toggled (not on initial load)
+    // Navigate when demo mode is toggled (not on initial load)
     if (prevDemoMode.current !== null && prevDemoMode.current !== demoMode) {
-      router.push('/');
+      queryClient.clear();
+      const hasToken = localStorage.getItem(TOKEN_KEY);
+      if (demoMode) {
+        router.replace('/');
+      } else if (!hasToken) {
+        // Avoid pushing '/' while unauthenticated — AuthGate would spin forever
+        router.replace('/login');
+      } else {
+        router.replace('/');
+      }
     }
     prevDemoMode.current = demoMode;
-  }, [demoMode, mounted, router]);
+  }, [demoMode, hydrated, router, queryClient]);
 
   const toggleDemoMode = useCallback(() => {
     setDemoModeState((prev) => !prev);
@@ -55,12 +67,8 @@ export function DemoModeProvider({ children }: { children: ReactNode }) {
     setDemoModeState(enabled);
   }, []);
 
-  if (!mounted) {
-    return null;
-  }
-
   return (
-    <DemoModeContext.Provider value={{ demoMode, toggleDemoMode, setDemoMode }}>
+    <DemoModeContext.Provider value={{ demoMode, hydrated, toggleDemoMode, setDemoMode }}>
       {children}
     </DemoModeContext.Provider>
   );

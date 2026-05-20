@@ -100,6 +100,16 @@ test.describe('Login page', () => {
     await expect(loginPage.loginInput).toHaveAttribute('required', '');
     await expect(loginPage.passwordInput).toHaveAttribute('required', '');
   });
+
+  test('explore demo bypasses login and opens dashboard', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.removeItem('qod-demo-mode');
+      localStorage.removeItem('qod-auth-token');
+    });
+    await loginPage.exploreDemoButton.click();
+    await expect(page.getByText('Quality Observability Dashboard')).toBeVisible();
+    await expect(page).not.toHaveURL(/\/login/);
+  });
 });
 
 test.describe('Auth gate', () => {

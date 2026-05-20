@@ -49,6 +49,7 @@ export class LoginPage {
   readonly loginInput: Locator;
   readonly passwordInput: Locator;
   readonly submitButton: Locator;
+  readonly exploreDemoButton: Locator;
   readonly errorAlert: Locator;
   readonly heading: Locator;
 
@@ -56,6 +57,7 @@ export class LoginPage {
     this.loginInput = page.locator('#login');
     this.passwordInput = page.locator('#password');
     this.submitButton = page.getByRole('button', { name: /sign in/i });
+    this.exploreDemoButton = page.getByRole('button', { name: /explore demo/i });
     // Next.js has a hidden route-announcer with role="alert"; target app error alerts by class
     this.errorAlert = page.locator('div[role="alert"].rounded-md');
     this.heading = page.getByRole('heading', { name: /sign in to qod/i });

@@ -18,6 +18,20 @@ test.describe('Demo mode toggle', () => {
     await expect(page.getByText('Quality Observability Dashboard')).toBeVisible();
   });
 
+  test('toggling demo off from dashboard without auth redirects to login', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('qod-demo-mode', 'true');
+      localStorage.removeItem('qod-auth-token');
+      localStorage.removeItem('qod-auth-user');
+    });
+    await page.goto('/');
+    await expect(page.getByText('Quality Observability Dashboard')).toBeVisible();
+
+    await page.locator('button').filter({ hasText: 'Demo' }).click();
+    await page.waitForURL('**/login', { timeout: 15_000 });
+    await expect(page).toHaveURL(/\/login/);
+  });
+
   test('disabling demo mode without auth redirects to login', async ({ page }) => {
     // Start with demo off, no auth — should go to login
     await page.addInitScript(() => {
