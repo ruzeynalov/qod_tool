@@ -190,7 +190,15 @@ function ragToBadgeVariant(rag: 'GREEN' | 'AMBER' | 'RED') {
 
 // ─── Connectors Tab ──────────────────────────────────────────────────
 
-function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; readOnly?: boolean }) {
+function ConnectorsTab({
+  projectId,
+  readOnly = false,
+  demoMode = false,
+}: {
+  projectId: string;
+  readOnly?: boolean;
+  demoMode?: boolean;
+}) {
   const queryClient = useQueryClient();
   const fetchConnectors = useCallback(async () => {
     try {
@@ -202,6 +210,7 @@ function ConnectorsTab({ projectId, readOnly = false }: { projectId: string; rea
   const { data: rawConnectors = [] } = useQuery<any[]>({
     queryKey: ['connectors', projectId],
     queryFn: fetchConnectors,
+    enabled: !demoMode,
     staleTime: 10_000,
   });
   const connectors: Connector[] = rawConnectors
@@ -1670,7 +1679,9 @@ export default function ProjectSettingsPage() {
       )}
 
       {/* Connectors tab: members can sync but not edit — rendered outside the inert wrapper */}
-      {activeTab === 'connectors' && <ConnectorsTab projectId={id} readOnly={!isAdmin || demoMode} />}
+      {activeTab === 'connectors' && (
+        <ConnectorsTab projectId={id} readOnly={!isAdmin || demoMode} demoMode={demoMode} />
+      )}
 
       {/* KPI Formulas: rendered outside the inert wrapper so the live preview
           stays interactive even in read-only mode. The configurator handles

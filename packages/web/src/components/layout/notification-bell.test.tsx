@@ -40,7 +40,7 @@ describe('NotificationBell', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockUseDemoMode.mockReturnValue({ demoMode: false });
+    mockUseDemoMode.mockReturnValue({ demoMode: false, hydrated: true });
     mockUseMarkNotificationRead.mockReturnValue({ mutate: vi.fn() });
     mockUseMarkAllNotificationsRead.mockReturnValue({ mutate: vi.fn() });
     mockUseUnreadNotificationCount.mockReturnValue({ data: { count: 2 } });

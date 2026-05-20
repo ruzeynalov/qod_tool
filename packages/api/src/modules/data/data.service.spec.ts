@@ -1294,6 +1294,15 @@ describe('DataService', () => {
   // ── getDefectTrend ────────────────────────────────────────
 
   describe('getDefectTrend()', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it('should return daily entries with date, opened, and closed', async () => {
       const defects = [
         { createdAt: new Date('2026-02-02'), resolvedAt: new Date('2026-02-05') },

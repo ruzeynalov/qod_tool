@@ -64,7 +64,7 @@ describe('AlertRulesPage', () => {
     vi.useRealTimers();
 
     mockUseParams.mockReturnValue({ id: 'project-1' });
-    mockUseDemoMode.mockReturnValue({ demoMode: false });
+    mockUseDemoMode.mockReturnValue({ demoMode: false, hydrated: true });
     mockUseAuth.mockReturnValue({ isAdmin: true });
     mockUseAlertRules.mockReturnValue({ data: baseRules, isLoading: false, error: null });
     mockUseCreateAlertRule.mockReturnValue(createRule);
@@ -90,7 +90,7 @@ describe('AlertRulesPage', () => {
 
   it('shows the demo warning instead of opening the create modal in demo mode', () => {
     vi.useFakeTimers();
-    mockUseDemoMode.mockReturnValue({ demoMode: true });
+    mockUseDemoMode.mockReturnValue({ demoMode: true, hydrated: true });
 
     render(<AlertRulesPage />);
 

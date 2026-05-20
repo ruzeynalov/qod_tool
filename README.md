@@ -17,7 +17,9 @@ git clone <repo-url> && cd qod
 cd deploy/docker-compose && docker compose up --build -d
 ```
 
-That's it. Open **http://localhost:3000**. The API auto-runs Prisma migrations and seeds the database on first start.
+That's it. Open **http://localhost:9090** (nginx routes the UI and API). The API auto-runs Prisma migrations and seeds the database on first start.
+
+> **Note:** The web container is not published on port 3000 in the default Compose file. Use **9090** for the full Docker stack, or **http://localhost:4000/api/docs** for Swagger only. For frontend-only local dev without Docker, use `npm run -w packages/web dev` and open **http://localhost:3000**.
 
 
 Default seed users are created on first start. Credentials are set in `packages/api/src/database/seeds/seed.ts`. Login accepts email or username.

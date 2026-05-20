@@ -61,6 +61,16 @@ describe('AuthProvider', () => {
     expect(localStorageMock.setItem).toHaveBeenCalledWith('qod-auth-user', JSON.stringify(user));
   });
 
+  it('login clears demo mode so authenticated requests stop being stripped of their token', () => {
+    localStorageMock.setItem('qod-demo-mode', 'true');
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    act(() => {
+      result.current.login('my-token', { id: '1', email: 'a@b.com', name: 'Test', role: 'ADMIN', orgId: 'o1' });
+    });
+    expect(localStorageMock.setItem).toHaveBeenCalledWith('qod-demo-mode', 'false');
+    expect(localStorageMock.getItem('qod-demo-mode')).toBe('false');
+  });
+
   it('logout clears token and user from localStorage', () => {
     const { result } = renderHook(() => useAuth(), { wrapper });
     act(() => {

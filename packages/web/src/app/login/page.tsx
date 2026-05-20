@@ -3,12 +3,14 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/app/_providers/auth-provider';
+import { useDemoMode } from '@/app/_providers/demo-mode-provider';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
 export default function LoginPage() {
   const router = useRouter();
   const { login: authLogin } = useAuth();
+  const { setDemoMode } = useDemoMode();
   const [loginValue, setLoginValue] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -97,6 +99,31 @@ export default function LoginPage() {
             {loading ? 'Signing in...' : 'Sign in'}
           </button>
         </form>
+
+        <div className="relative">
+          <div className="absolute inset-0 flex items-center">
+            <div className="w-full border-t border-qod-border" />
+          </div>
+          <div className="relative flex justify-center text-xs">
+            <span className="bg-qod-surface px-2 text-muted">or</span>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => {
+            localStorage.removeItem('qod-auth-token');
+            localStorage.removeItem('qod-auth-user');
+            setDemoMode(true);
+            router.replace('/');
+          }}
+          className="w-full rounded-lg border border-qod-border px-4 py-2 text-sm font-medium text-primary transition-colors hover:border-qod-accent hover:bg-qod-bg"
+        >
+          Explore demo
+        </button>
+        <p className="text-center text-xs text-muted">
+          Client-side sample data — no API or database required
+        </p>
       </div>
     </div>
   );

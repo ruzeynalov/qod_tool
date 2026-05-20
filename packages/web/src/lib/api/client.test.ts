@@ -42,6 +42,23 @@ describe('apiClient', () => {
     expect(result).toEqual({ count: 3 });
   });
 
+  it('does not attach Authorization when demo mode is active', async () => {
+    localStorageMock.setItem('qod-auth-token', 'stale-token');
+    localStorageMock.setItem('qod-demo-mode', 'true');
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await apiClient('/api/v1/projects/demo-ecommerce');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/projects/demo-ecommerce',
+      expect.objectContaining({ headers: {} }),
+    );
+  });
+
   it('sends Content-Type when a JSON body is present', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

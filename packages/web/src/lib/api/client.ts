@@ -14,10 +14,11 @@ export async function apiClient<T>(
     ...(options?.headers as Record<string, string>),
   };
 
-  // Auto-attach auth token if available
+  // Auto-attach auth token if available (skip in demo — stale tokens must not hit the API)
   if (typeof window !== 'undefined') {
+    const inDemoMode = localStorage.getItem('qod-demo-mode') === 'true';
     const token = localStorage.getItem(TOKEN_KEY);
-    if (token && !headers['Authorization']) {
+    if (token && !inDemoMode && !headers['Authorization']) {
       headers['Authorization'] = `Bearer ${token}`;
     }
   }
@@ -29,7 +30,10 @@ export async function apiClient<T>(
 
   if (!res.ok) {
     if (res.status === 401) {
-      if (typeof window !== 'undefined') {
+      // Demo mode uses client-side data; a stale token must not force logout.
+      const inDemoMode =
+        typeof window !== 'undefined' && localStorage.getItem('qod-demo-mode') === 'true';
+      if (!inDemoMode && typeof window !== 'undefined') {
         localStorage.removeItem('qod-auth-token');
         localStorage.removeItem('qod-auth-user');
         window.location.href = '/login';
