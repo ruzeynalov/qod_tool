@@ -14,10 +14,11 @@ export async function apiClient<T>(
     ...(options?.headers as Record<string, string>),
   };
 
-  // Auto-attach auth token if available
+  // Auto-attach auth token if available (skip in demo — stale tokens must not hit the API)
   if (typeof window !== 'undefined') {
+    const inDemoMode = localStorage.getItem('qod-demo-mode') === 'true';
     const token = localStorage.getItem(TOKEN_KEY);
-    if (token && !headers['Authorization']) {
+    if (token && !inDemoMode && !headers['Authorization']) {
       headers['Authorization'] = `Bearer ${token}`;
     }
   }

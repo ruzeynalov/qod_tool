@@ -5,7 +5,6 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
@@ -34,7 +33,7 @@ export function DemoModeProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
   const queryClient = useQueryClient();
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     setDemoModeState(localStorage.getItem(STORAGE_KEY) === 'true');
     setHydrated(true);
   }, []);
