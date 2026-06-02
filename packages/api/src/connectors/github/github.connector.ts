@@ -430,7 +430,9 @@ export class GitHubConnector implements IQODConnector {
    *
    * Priority:
    *   1. User-configured `artifactPattern` (supports `*` wildcards).
-   *   2. Strict raw-Allure shard pattern: `allure-results-shard-N`.
+   *   2. Strict raw-Allure shard pattern: `allure-results-shard-N` (with an
+   *      optional `-attempt-N` / `-retry-N` / `-rerun-N` suffix that GitHub
+   *      Actions appends when a workflow is re-run).
    *   3. Common Allure naming variants:
    *        - `allure-results` / `allure-results-N` (non-`shard-` numeric)
    *        - `allure-results-(merged|combined|all)`
@@ -453,19 +455,33 @@ export class GitHubConnector implements IQODConnector {
       }
     }
 
-    // Tier 2: strict raw shard pattern
-    const tier2 = fresh.filter((a) => /^allure-results-shard-\d+(?:\.zip)?$/.test(a.name));
+    // GitHub Actions appends `-attempt-N` to artifact names when a workflow
+    // is re-run (and some pipelines use `-retry-N` / `-rerun-N`). Real-world
+    // example: apache/fineract uploads `allure-results-shard-3-attempt-1`.
+    // The trailing `${ATTEMPT_SUFFIX}` captures those variants so the strict
+    // raw-Allure tier still matches them instead of falling through to less
+    // precise tiers (e.g. JUnit XML), which silently reports a smaller subset
+    // of tests.
+    const ATTEMPT_SUFFIX = '(?:-(?:attempt|retry|rerun)-\\d+)?';
+
+    // Tier 2: strict raw shard pattern (with optional run-attempt suffix).
+    const tier2 = fresh.filter((a) =>
+      new RegExp(`^allure-results-shard-\\d+${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name),
+    );
     if (tier2.length > 0) {
       tiers.push({ label: 'raw-allure-shards', artifacts: tier2 });
     }
 
     // Tier 3: broader Allure naming variants — bare, indexed, merged. Avoids
-    // `allure-report` (built HTML) and other ad-hoc names.
+    // `allure-report` (built HTML) and other ad-hoc names. The bare-name path
+    // also accepts the `-attempt-N` suffix (Codex review): single-shard
+    // workflows that upload a lone `allure-results-attempt-1` would otherwise
+    // fall through to JUnit XML even though the artifact contains raw Allure.
     const tier3 = fresh.filter(
       (a) =>
-        a.name === 'allure-results' ||
-        /^allure-results-\d+(?:\.zip)?$/.test(a.name) ||
-        /^allure-results-(merged|combined|all|raw)(?:\.zip)?$/.test(a.name),
+        new RegExp(`^allure-results${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name) ||
+        new RegExp(`^allure-results-\\d+${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name) ||
+        new RegExp(`^allure-results-(merged|combined|all|raw)${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name),
     );
     if (tier3.length > 0) {
       tiers.push({ label: 'raw-allure-variants', artifacts: tier3 });
@@ -476,9 +492,9 @@ export class GitHubConnector implements IQODConnector {
     // fail because built reports collapse retry attempts.
     const tier4 = fresh.filter(
       (a) =>
-        a.name === 'allure-report' ||
-        /^allure-report-(?:shard-)?\d+(?:\.zip)?$/.test(a.name) ||
-        /^allure-report-(merged|combined|all)(?:\.zip)?$/.test(a.name),
+        new RegExp(`^allure-report${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name) ||
+        new RegExp(`^allure-report-(?:shard-)?\\d+${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name) ||
+        new RegExp(`^allure-report-(merged|combined|all)${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name),
     );
     if (tier4.length > 0) {
       tiers.push({ label: 'built-allure-reports', artifacts: tier4 });
@@ -552,6 +568,90 @@ export class GitHubConnector implements IQODConnector {
     });
   }
 
+  // ──────────────── Private: HTTP retry ────────────────
+
+  /** Total attempts (initial + retries) for transient GitHub API errors. */
+  private static readonly REQUEST_MAX_ATTEMPTS = 3;
+
+  /** Base exponential-backoff delay between retries, in ms. */
+  private static readonly REQUEST_RETRY_BASE_MS = 500;
+
+  /**
+   * Upstream/transient HTTP statuses that warrant a retry. Excludes 429
+   * (rate limit) because `request()` already pre-emptively waits on a
+   * known-empty bucket; a 429 leaking through means the bucket flipped
+   * mid-request and immediate retry would just hit the same wall.
+   */
+  private static readonly RETRY_STATUS = new Set([500, 502, 503, 504, 522, 524]);
+
+  /**
+   * Wrap `request()` with bounded exponential-backoff retries for transient
+   * upstream failures (502/503/504 Bad Gateway / Service Unavailable /
+   * Gateway Timeout, and the Cloudflare 522/524 family GitHub occasionally
+   * surfaces) and network-level errors (DNS hiccup, connection reset,
+   * AbortError from the per-request 30s timeout). Without this, a single
+   * 502 on any of the N×(jobs+artifacts) calls during a multi-run sync
+   * aborts the whole job and the user sees
+   * `GitHub API error fetching jobs: 502 when fetching last 10 runs`.
+   * The caller still inspects `response.ok` and decides whether to treat
+   * the final outcome as fatal.
+   */
+  private async requestWithRetry(
+    path: string,
+    token: string,
+    query: Record<string, string> | undefined,
+    label: string,
+  ): Promise<Response> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= GitHubConnector.REQUEST_MAX_ATTEMPTS; attempt++) {
+      try {
+        const response = await this.request(path, token, query);
+        const transient = GitHubConnector.RETRY_STATUS.has(response.status);
+        if (!transient || attempt === GitHubConnector.REQUEST_MAX_ATTEMPTS) {
+          return response;
+        }
+        // Drain the body so the underlying socket can be reused for the
+        // next attempt instead of being held until GC.
+        await response.body?.cancel?.().catch(() => undefined);
+        const delay = this.computeRetryDelay(attempt, response.headers.get('retry-after'));
+        this.logger.warn(
+          `[${label}] HTTP ${response.status} from GitHub (attempt ${attempt}/${GitHubConnector.REQUEST_MAX_ATTEMPTS}); retrying in ${delay}ms`,
+        );
+        await this.sleep(delay);
+      } catch (err) {
+        lastError = err;
+        if (attempt === GitHubConnector.REQUEST_MAX_ATTEMPTS) throw err;
+        const delay = this.computeRetryDelay(attempt);
+        this.logger.warn(
+          `[${label}] network error "${err instanceof Error ? err.message : String(err)}" ` +
+          `(attempt ${attempt}/${GitHubConnector.REQUEST_MAX_ATTEMPTS}); retrying in ${delay}ms`,
+        );
+        await this.sleep(delay);
+      }
+    }
+    // Unreachable: the loop either returns or throws on the last iteration.
+    throw lastError ?? new Error(`requestWithRetry: exhausted ${GitHubConnector.REQUEST_MAX_ATTEMPTS} attempts`);
+  }
+
+  private computeRetryDelay(attempt: number, retryAfterHeader?: string | null): number {
+    // Respect Retry-After when GitHub provides one (capped so a long
+    // server-suggested wait doesn't stall the whole sync window).
+    if (retryAfterHeader) {
+      const sec = parseInt(retryAfterHeader, 10);
+      if (Number.isFinite(sec) && sec > 0) return Math.min(sec * 1000, 30_000);
+    }
+    // Deterministic exponential backoff (no jitter — keeps unit tests
+    // stable; sync workers don't run in herds, so jitter wouldn't add
+    // much). attempt=1 → 500ms, 2 → 1000ms, 3 → 2000ms (last attempt
+    // returns the response, so 2000ms is the largest delay actually
+    // waited in practice).
+    return GitHubConnector.REQUEST_RETRY_BASE_MS * 2 ** (attempt - 1);
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
   private checkRateLimit(response: Response): void {
     const remaining = response.headers.get('x-ratelimit-remaining');
     const resetEpoch = response.headers.get('x-ratelimit-reset');
@@ -598,7 +698,7 @@ export class GitHubConnector implements IQODConnector {
     }
 
     this.logger.log(`Fetching workflow runs: ${basePath} query=${JSON.stringify(query)}`);
-    const response = await this.request(basePath, creds.token, query);
+    const response = await this.requestWithRetry(basePath, creds.token, query, 'workflow-runs');
     this.checkRateLimit(response);
 
     if (!response.ok) {
@@ -633,7 +733,7 @@ export class GitHubConnector implements IQODConnector {
     }
 
     this.logger.log(`Fetching branch workflow runs: ${basePath} branch=${branch} query=${JSON.stringify(query)}`);
-    const response = await this.request(basePath, creds.token, query);
+    const response = await this.requestWithRetry(basePath, creds.token, query, 'branch-workflow-runs');
     this.checkRateLimit(response);
 
     if (!response.ok) {
@@ -647,24 +747,98 @@ export class GitHubConnector implements IQODConnector {
     return data.workflow_runs.slice(0, maxRuns);
   }
 
+  /** Upper bound on pages fetched from /jobs?filter=all (per_page=100 → ≤1000 raw jobs). */
+  private static readonly JOBS_MAX_PAGES = 10;
+
   private async fetchJobsForRun(
     creds: GitHubCredentials,
     runId: number,
   ): Promise<GitHubJob[]> {
-    const response = await this.request(
-      `/repos/${creds.owner}/${creds.repo}/actions/runs/${runId}/jobs`,
-      creds.token,
-      { per_page: '100' },
-    );
+    // Always use `filter=all` and dedup ourselves rather than the default
+    // `filter=latest`. GitHub's `/jobs` endpoint persistently returns 502
+    // Bad Gateway for some workflow runs that have been re-attempted
+    // (`run_attempt >= 2`) under the default filter — empirically verified
+    // against apache/fineract on 2026-06-02 where runs #695 / #725 / #726
+    // (all run_attempt=2) returned 502 on `/jobs` and `/jobs?filter=latest`
+    // but 200 on `/jobs?filter=all`. The connector's bounded retry can't
+    // recover from a *persistent* upstream 502; the only way to make
+    // multi-run sync stable while GitHub has the bug is to avoid the
+    // broken filter entirely. `filter=all` returns jobs from every
+    // attempt, so we collapse them back to the latest-attempt-per-name
+    // view that `filter=latest` was supposed to give us.
+    //
+    // `filter=all` returns up to `job_count × attempt_count` rows, which
+    // routinely exceeds the GitHub-imposed 100-per-page cap (Codex review
+    // on PR #20: 174 rows total for fineract #726, 100 on page 1 + 74 on
+    // page 2). Page through `?page=N` until exhausted so dedup sees every
+    // attempt, otherwise the latest attempt of some shards could sit on
+    // a later page and we'd silently keep a stale attempt-1 row.
+    //
+    // Best-effort pagination: a hard upstream error on page ≥ 2 (the
+    // same GitHub bug that made us switch to `filter=all` is also
+    // observed on some `?page=2` requests of the same run) falls back to
+    // the pages already collected with a warning, rather than aborting
+    // the whole sync. Page 1 still throws because zero data would
+    // produce wrong shard-count fallbacks downstream.
+    const allJobs: GitHubJob[] = [];
+    let stoppedEarly: { page: number; reason: string } | null = null;
+    for (let page = 1; page <= GitHubConnector.JOBS_MAX_PAGES; page++) {
+      const response = await this.requestWithRetry(
+        `/repos/${creds.owner}/${creds.repo}/actions/runs/${runId}/jobs`,
+        creds.token,
+        { per_page: '100', filter: 'all', page: String(page) },
+        `jobs/run-${runId}/page-${page}`,
+      );
 
-    this.checkRateLimit(response);
+      this.checkRateLimit(response);
 
-    if (!response.ok) {
-      throw new Error(`GitHub API error fetching jobs: ${response.status}`);
+      if (!response.ok) {
+        if (page === 1) {
+          throw new Error(`GitHub API error fetching jobs: ${response.status}`);
+        }
+        stoppedEarly = { page, reason: `HTTP ${response.status}` };
+        break;
+      }
+
+      const data = await response.json() as { jobs: GitHubJob[]; total_count?: number };
+      allJobs.push(...data.jobs);
+
+      // Stop when GitHub returns a partial page (no more rows) or when we
+      // have already covered `total_count` (handles small variations in
+      // page size at the tail).
+      const fullPage = data.jobs.length >= 100;
+      const reachedTotal = data.total_count != null && allJobs.length >= data.total_count;
+      if (!fullPage || reachedTotal) break;
     }
 
-    const data = await response.json() as { jobs: GitHubJob[] };
-    return data.jobs;
+    if (stoppedEarly) {
+      this.logger.warn(
+        `jobs/run-${runId}: stopped paginating at page ${stoppedEarly.page} (${stoppedEarly.reason}); ` +
+        `using ${allJobs.length} jobs collected from earlier pages. ` +
+        `Latest-attempt dedup still applies, but a shard whose latest attempt fell on the dropped page may show its earlier attempt's conclusion.`,
+      );
+    }
+
+    return this.dedupJobsByLatestAttempt(allJobs);
+  }
+
+  /**
+   * Keep one job per `name`, preferring the highest `run_attempt`. Mirrors
+   * GitHub's `filter=latest` semantics that we can no longer rely on (see
+   * `fetchJobsForRun` for the 502 reason). Jobs without `run_attempt`
+   * (older API responses or single-attempt runs) collapse correctly under
+   * the `?? 0` default — first seen wins, which is fine because every
+   * job carries the same attempt number on those runs anyway.
+   */
+  private dedupJobsByLatestAttempt(jobs: GitHubJob[]): GitHubJob[] {
+    const byName = new Map<string, GitHubJob>();
+    for (const job of jobs) {
+      const existing = byName.get(job.name);
+      if (!existing || (job.run_attempt ?? 0) > (existing.run_attempt ?? 0)) {
+        byName.set(job.name, job);
+      }
+    }
+    return Array.from(byName.values());
   }
 
   // ──────────────── Private: Artifacts ────────────────
@@ -673,10 +847,11 @@ export class GitHubConnector implements IQODConnector {
     creds: GitHubCredentials,
     runId: number,
   ): Promise<GitHubArtifact[]> {
-    const response = await this.request(
+    const response = await this.requestWithRetry(
       `/repos/${creds.owner}/${creds.repo}/actions/runs/${runId}/artifacts`,
       creds.token,
       { per_page: '100' },
+      `artifacts/run-${runId}`,
     );
 
     this.checkRateLimit(response);
@@ -1554,6 +1729,8 @@ interface GitHubJob {
   conclusion: string | null;
   started_at: string;
   completed_at: string;
+  /** Workflow run attempt this job belongs to (1 for original, 2+ for re-runs). */
+  run_attempt?: number;
   steps?: GitHubStep[];
 }
 
