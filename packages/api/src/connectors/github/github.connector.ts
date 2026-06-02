@@ -751,10 +751,22 @@ export class GitHubConnector implements IQODConnector {
     creds: GitHubCredentials,
     runId: number,
   ): Promise<GitHubJob[]> {
+    // Always use `filter=all` and dedup ourselves rather than the default
+    // `filter=latest`. GitHub's `/jobs` endpoint persistently returns 502
+    // Bad Gateway for some workflow runs that have been re-attempted
+    // (`run_attempt >= 2`) under the default filter — empirically verified
+    // against apache/fineract on 2026-06-02 where runs #695 / #725 / #726
+    // (all run_attempt=2) returned 502 on `/jobs` and `/jobs?filter=latest`
+    // but 200 on `/jobs?filter=all`. The connector's bounded retry can't
+    // recover from a *persistent* upstream 502; the only way to make
+    // multi-run sync stable while GitHub has the bug is to avoid the
+    // broken filter entirely. `filter=all` returns jobs from every
+    // attempt, so we collapse them back to the latest-attempt-per-name
+    // view that `filter=latest` was supposed to give us.
     const response = await this.requestWithRetry(
       `/repos/${creds.owner}/${creds.repo}/actions/runs/${runId}/jobs`,
       creds.token,
-      { per_page: '100' },
+      { per_page: '100', filter: 'all' },
       `jobs/run-${runId}`,
     );
 
@@ -765,7 +777,26 @@ export class GitHubConnector implements IQODConnector {
     }
 
     const data = await response.json() as { jobs: GitHubJob[] };
-    return data.jobs;
+    return this.dedupJobsByLatestAttempt(data.jobs);
+  }
+
+  /**
+   * Keep one job per `name`, preferring the highest `run_attempt`. Mirrors
+   * GitHub's `filter=latest` semantics that we can no longer rely on (see
+   * `fetchJobsForRun` for the 502 reason). Jobs without `run_attempt`
+   * (older API responses or single-attempt runs) collapse correctly under
+   * the `?? 0` default — first seen wins, which is fine because every
+   * job carries the same attempt number on those runs anyway.
+   */
+  private dedupJobsByLatestAttempt(jobs: GitHubJob[]): GitHubJob[] {
+    const byName = new Map<string, GitHubJob>();
+    for (const job of jobs) {
+      const existing = byName.get(job.name);
+      if (!existing || (job.run_attempt ?? 0) > (existing.run_attempt ?? 0)) {
+        byName.set(job.name, job);
+      }
+    }
+    return Array.from(byName.values());
   }
 
   // ──────────────── Private: Artifacts ────────────────
@@ -1656,6 +1687,8 @@ interface GitHubJob {
   conclusion: string | null;
   started_at: string;
   completed_at: string;
+  /** Workflow run attempt this job belongs to (1 for original, 2+ for re-runs). */
+  run_attempt?: number;
   steps?: GitHubStep[];
 }
 

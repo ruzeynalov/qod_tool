@@ -163,7 +163,7 @@ describe('GitHubConnector', () => {
 
       nock(GITHUB_API)
         .get('/repos/my-org/my-repo/actions/runs/123456/jobs')
-        .query({ per_page: 100 })
+        .query(true)
         .reply(200, { total_count: 1, jobs: [mockJob()] });
 
       const results = await connector.fetchPipelineRuns!(makeConfig(), since);
@@ -1771,6 +1771,71 @@ describe('GitHubConnector', () => {
       // had been registered, so explicitly assert nock's pending list to
       // catch a regression where 4xx accidentally became retryable.
       expect(nock.pendingMocks()).toHaveLength(0);
+    });
+  });
+
+  // ──────────────── Re-attempted run handling (filter=all + dedup) ────
+
+  describe('re-attempted workflow runs (RUZ-31)', () => {
+    it('requests jobs with filter=all and dedups to the latest run_attempt per name', async () => {
+      // Root cause for the post-retry-fix 502 on apache/fineract:
+      // `/actions/runs/<id>/jobs` (default `filter=latest`) returns 502 Bad
+      // Gateway for some workflow runs with run_attempt >= 2 (verified
+      // empirically against fineract runs #695 / #725 / #726 on 2026-06-02).
+      // We work around the GitHub-side bug by always using filter=all and
+      // collapsing the result back to the latest-attempt-per-name view.
+      const run = mockWorkflowRun({ id: 300301 });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      // Reject any /jobs call that doesn't include filter=all — this is
+      // exactly the request shape that 502s in production, so missing
+      // filter=all would mean we've regressed back to the broken path.
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/300301/jobs')
+        .query((q) => q.filter === 'all' && q.per_page === '100')
+        .reply(200, {
+          jobs: [
+            // Shard 1: attempt 1 failed, attempt 2 succeeded → keep attempt 2.
+            { id: 1, name: 'E2E Tests (Shard 1 of 2)', conclusion: 'failure', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z', run_attempt: 1 },
+            { id: 11, name: 'E2E Tests (Shard 1 of 2)', conclusion: 'success', started_at: '2025-01-15T11:00:00Z', completed_at: '2025-01-15T11:05:00Z', run_attempt: 2 },
+            // Shard 2: only attempt 1 (passed first time, no re-run).
+            { id: 2, name: 'E2E Tests (Shard 2 of 2)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z', run_attempt: 1 },
+          ],
+        });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/300301/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [] });
+
+      const config = makeConfig({
+        credentials: {
+          token: 'ghp_testtoken123',
+          owner: 'my-org',
+          repo: 'my-repo',
+          workflowFile: 'e2e.yml',
+          branch: 'develop',
+          maxRuns: 1,
+        },
+      });
+      const results = await connector.fetchTestRuns!(config);
+      expect(results).toHaveLength(1);
+      // No Allure / JUnit artifacts → shard-count fallback. Both shards
+      // were ultimately successful (Shard 1 via re-run, Shard 2 first
+      // try) so the run name reads "2 shards passed", not "1 failed
+      // shard" (which is what the un-deduped jobs list would produce).
+      expect(results[0].name).toContain('(2 shards passed)');
+      expect(results[0].countSource).toBe('CI_JOBS');
+      expect(results[0].summaryCounts).toEqual(expect.objectContaining({
+        totalTests: 2,
+        passedCount: 2,
+        failedCount: 0,
+      }));
+      expect(nock.isDone()).toBe(true);
     });
   });
 
