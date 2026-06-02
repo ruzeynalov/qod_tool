@@ -147,20 +147,28 @@ jobs:
 
       - run: npm ci
 
-      # The @fastify/middie path-bypass advisory family (GHSA-cxrg-g7r8-w69p and
-      # three related) is pulled in transitively by @nestjs/platform-fastify@10.x,
-      # which pins middie@8.3.3. The exploit requires path-scoped Express-style
-      # middleware (app.use / MiddlewareConsumer / NestMiddleware) — QOD does not
-      # use any in packages/api/src, so the advisory does not apply at runtime.
-      # The proper fix is the NestJS 10→11 migration; remove this allowlist entry
-      # when that ships.
+      # Allowlist for critical advisories that do not apply to QOD's runtime:
+      #
+      # - @fastify/middie (GHSA-cxrg-g7r8-w69p and three related): path-bypass
+      #   pulled transitively by @nestjs/platform-fastify@10.x (pins
+      #   middie@8.3.3). The exploit requires path-scoped Express-style
+      #   middleware (app.use / MiddlewareConsumer / NestMiddleware) — QOD does
+      #   not use any in packages/api/src. The proper fix is the NestJS 10→11
+      #   migration; remove this entry when that ships.
+      #
+      # - vitest / @vitest/coverage-v8 ("Vitest UI server arbitrary file
+      #   read/exec"): the exploit requires `vitest --ui` to be listening. QOD
+      #   only invokes `vitest run` (CLI, no server) in CI and locally, and
+      #   vitest is a devDependency — it is never shipped into the deployed
+      #   API/web containers. Remove these entries when bumping to a patched
+      #   vitest release.
       - name: npm audit (allowlist + block on remaining criticals)
         run: |
           set -o pipefail
           report=$(npm audit --json || true)
           echo "$report" | node -e '
             const r = JSON.parse(require("fs").readFileSync(0, "utf8"));
-            const ALLOW = new Set(["@fastify/middie"]);
+            const ALLOW = new Set(["@fastify/middie", "vitest", "@vitest/coverage-v8"]);
             const offenders = Object.entries(r.vulnerabilities || {})
               .filter(([name, v]) => v.severity === "critical" && !ALLOW.has(name));
             if (offenders.length) {
@@ -172,7 +180,7 @@ jobs:
               process.exit(1);
             }
             console.log("No critical advisories outside allowlist.");
-            console.log("Allowlisted: @fastify/middie (NestJS 10→11 migration tracked separately).");
+            console.log("Allowlisted: @fastify/middie (NestJS 10→11 migration), vitest + @vitest/coverage-v8 (UI-only advisory; QOD uses CLI vitest only, devDependency).");
           '
           # Report high+ for visibility, but do not fail the build.
           npm audit --audit-level=high || true
