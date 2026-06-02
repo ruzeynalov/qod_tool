@@ -473,10 +473,13 @@ export class GitHubConnector implements IQODConnector {
     }
 
     // Tier 3: broader Allure naming variants — bare, indexed, merged. Avoids
-    // `allure-report` (built HTML) and other ad-hoc names.
+    // `allure-report` (built HTML) and other ad-hoc names. The bare-name path
+    // also accepts the `-attempt-N` suffix (Codex review): single-shard
+    // workflows that upload a lone `allure-results-attempt-1` would otherwise
+    // fall through to JUnit XML even though the artifact contains raw Allure.
     const tier3 = fresh.filter(
       (a) =>
-        a.name === 'allure-results' ||
+        new RegExp(`^allure-results${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name) ||
         new RegExp(`^allure-results-\\d+${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name) ||
         new RegExp(`^allure-results-(merged|combined|all|raw)${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name),
     );
@@ -489,7 +492,7 @@ export class GitHubConnector implements IQODConnector {
     // fail because built reports collapse retry attempts.
     const tier4 = fresh.filter(
       (a) =>
-        a.name === 'allure-report' ||
+        new RegExp(`^allure-report${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name) ||
         new RegExp(`^allure-report-(?:shard-)?\\d+${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name) ||
         new RegExp(`^allure-report-(merged|combined|all)${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name),
     );

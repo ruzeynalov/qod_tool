@@ -699,6 +699,46 @@ describe('GitHubConnector', () => {
       expect(diag.runsWithoutParsedResults).toBe(0);
     });
 
+    it('accepts bare allure-results / allure-report names with a run-attempt suffix (Codex review)', async () => {
+      // Single-shard workflows that upload a lone artifact named
+      // `allure-results-attempt-${{ github.run_attempt }}` (no shard or merged
+      // token between the stem and the suffix) would otherwise fall through
+      // to JUnit XML even though the artifact contains raw Allure JSON.
+      // Tier-3 must accept the bare-name + attempt-suffix shape.
+      const run = mockWorkflowRun({ id: 9261, run_number: 926, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/9261/jobs')
+        .query(true)
+        .reply(200, {
+          jobs: [{ id: 1, name: 'E2E Tests', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }],
+        });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/9261/artifacts')
+        .query(true)
+        .reply(200, {
+          artifacts: [
+            { id: 92611, name: 'allure-results-attempt-1', size_in_bytes: 500, expired: false },
+          ],
+        });
+
+      const zip = makeAllureResultZip([
+        { name: 'Smoke test', status: 'passed', testRailId: 'C9261' },
+      ]);
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/92611/zip')
+        .reply(200, zip, { 'Content-Type': 'application/zip' });
+
+      const results = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(results).toHaveLength(1);
+      expect(results[0].results.map((r) => r.testExternalId)).toEqual(['9261']);
+      expect(results[0].countSource).toBe('TEST_RESULTS');
+    });
+
     it('parses built Allure HTML reports (data/test-cases/*.json) when raw results are absent', async () => {
       // Some workflows upload only the GENERATED Allure 2 report (the HTML
       // dashboard). The connector should fall back to parsing that
