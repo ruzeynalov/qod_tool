@@ -430,7 +430,9 @@ export class GitHubConnector implements IQODConnector {
    *
    * Priority:
    *   1. User-configured `artifactPattern` (supports `*` wildcards).
-   *   2. Strict raw-Allure shard pattern: `allure-results-shard-N`.
+   *   2. Strict raw-Allure shard pattern: `allure-results-shard-N` (with an
+   *      optional `-attempt-N` / `-retry-N` / `-rerun-N` suffix that GitHub
+   *      Actions appends when a workflow is re-run).
    *   3. Common Allure naming variants:
    *        - `allure-results` / `allure-results-N` (non-`shard-` numeric)
    *        - `allure-results-(merged|combined|all)`
@@ -453,8 +455,19 @@ export class GitHubConnector implements IQODConnector {
       }
     }
 
-    // Tier 2: strict raw shard pattern
-    const tier2 = fresh.filter((a) => /^allure-results-shard-\d+(?:\.zip)?$/.test(a.name));
+    // GitHub Actions appends `-attempt-N` to artifact names when a workflow
+    // is re-run (and some pipelines use `-retry-N` / `-rerun-N`). Real-world
+    // example: apache/fineract uploads `allure-results-shard-3-attempt-1`.
+    // The trailing `${ATTEMPT_SUFFIX}` captures those variants so the strict
+    // raw-Allure tier still matches them instead of falling through to less
+    // precise tiers (e.g. JUnit XML), which silently reports a smaller subset
+    // of tests.
+    const ATTEMPT_SUFFIX = '(?:-(?:attempt|retry|rerun)-\\d+)?';
+
+    // Tier 2: strict raw shard pattern (with optional run-attempt suffix).
+    const tier2 = fresh.filter((a) =>
+      new RegExp(`^allure-results-shard-\\d+${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name),
+    );
     if (tier2.length > 0) {
       tiers.push({ label: 'raw-allure-shards', artifacts: tier2 });
     }
@@ -464,8 +477,8 @@ export class GitHubConnector implements IQODConnector {
     const tier3 = fresh.filter(
       (a) =>
         a.name === 'allure-results' ||
-        /^allure-results-\d+(?:\.zip)?$/.test(a.name) ||
-        /^allure-results-(merged|combined|all|raw)(?:\.zip)?$/.test(a.name),
+        new RegExp(`^allure-results-\\d+${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name) ||
+        new RegExp(`^allure-results-(merged|combined|all|raw)${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name),
     );
     if (tier3.length > 0) {
       tiers.push({ label: 'raw-allure-variants', artifacts: tier3 });
@@ -477,8 +490,8 @@ export class GitHubConnector implements IQODConnector {
     const tier4 = fresh.filter(
       (a) =>
         a.name === 'allure-report' ||
-        /^allure-report-(?:shard-)?\d+(?:\.zip)?$/.test(a.name) ||
-        /^allure-report-(merged|combined|all)(?:\.zip)?$/.test(a.name),
+        new RegExp(`^allure-report-(?:shard-)?\\d+${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name) ||
+        new RegExp(`^allure-report-(merged|combined|all)${ATTEMPT_SUFFIX}(?:\\.zip)?$`).test(a.name),
     );
     if (tier4.length > 0) {
       tiers.push({ label: 'built-allure-reports', artifacts: tier4 });

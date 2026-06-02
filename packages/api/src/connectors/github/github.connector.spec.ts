@@ -629,6 +629,76 @@ describe('GitHubConnector', () => {
       expect(results[0].countSource).toBe('TEST_RESULTS');
     });
 
+    it('matches GitHub re-run attempt suffixes on raw-Allure shard names (RUZ-31)', async () => {
+      // User-reported regression on apache/fineract (RUZ-31): the workflow
+      // started uploading artifacts named `allure-results-shard-N-attempt-1`
+      // (using `${{ github.run_attempt }}` in the artifact name to support
+      // re-runs). The strict tier-2 regex required the name to end after the
+      // shard number, so every Allure artifact was skipped — the connector
+      // fell through to the JUnit-style `test-results` tier and surfaced a
+      // small subset of tests (~150 vs the real ~2 950). The fix accepts the
+      // `-attempt-N` (and `-retry-N` / `-rerun-N`) trailing token on every
+      // Allure tier so raw results still win.
+      const run = mockWorkflowRun({ id: 9251, run_number: 925, status: 'completed', conclusion: 'success', head_branch: 'develop' });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/9251/jobs')
+        .query(true)
+        .reply(200, {
+          jobs: [
+            { id: 1, name: 'E2E Tests (Shard 1 of 2)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' },
+            { id: 2, name: 'E2E Tests (Shard 2 of 2)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' },
+          ],
+        });
+
+      // Mix raw-allure (`-attempt-1`) with a generic `test-results` JUnit
+      // artifact (Fineract uploads both). Tier-2 must win even though tier-5
+      // would otherwise also match.
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/9251/artifacts')
+        .query(true)
+        .reply(200, {
+          artifacts: [
+            { id: 92511, name: 'allure-results-shard-1-attempt-1', size_in_bytes: 500, expired: false },
+            { id: 92512, name: 'allure-results-shard-2-attempt-1', size_in_bytes: 500, expired: false },
+            { id: 92513, name: 'test-results', size_in_bytes: 500, expired: false },
+          ],
+        });
+
+      const zipShard1 = makeAllureResultZip([
+        { name: 'Loan creation', status: 'passed', testRailId: 'C9251' },
+        { name: 'Loan repayment', status: 'passed', testRailId: 'C9252' },
+      ]);
+      const zipShard2 = makeAllureResultZip([
+        { name: 'Loan disbursal', status: 'passed', testRailId: 'C9253' },
+      ]);
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/92511/zip')
+        .reply(200, zipShard1, { 'Content-Type': 'application/zip' });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/artifacts/92512/zip')
+        .reply(200, zipShard2, { 'Content-Type': 'application/zip' });
+      // `test-results` artifact must NOT be downloaded — tier-2 wins first.
+
+      const results = await connector.fetchTestRuns!(makeAllureConfig());
+      expect(results).toHaveLength(1);
+      // All three Allure tests parsed (not the smaller JUnit subset).
+      expect(results[0].results.map((r) => r.testExternalId).sort()).toEqual(['9251', '9252', '9253']);
+      expect(results[0].countSource).toBe('TEST_RESULTS');
+
+      // Diagnostics must NOT flag the run as name-mismatched (otherwise the
+      // SyncService would surface a misleading "configure artifactPattern"
+      // warning to the user).
+      const diag = (connector as any).getDiagnostics();
+      expect(diag.runsWithoutMatchedArtifacts).toBe(0);
+      expect(diag.runsWithoutParsedResults).toBe(0);
+    });
+
     it('parses built Allure HTML reports (data/test-cases/*.json) when raw results are absent', async () => {
       // Some workflows upload only the GENERATED Allure 2 report (the HTML
       // dashboard). The connector should fall back to parsing that
