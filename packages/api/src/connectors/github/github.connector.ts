@@ -568,6 +568,90 @@ export class GitHubConnector implements IQODConnector {
     });
   }
 
+  // ──────────────── Private: HTTP retry ────────────────
+
+  /** Total attempts (initial + retries) for transient GitHub API errors. */
+  private static readonly REQUEST_MAX_ATTEMPTS = 3;
+
+  /** Base exponential-backoff delay between retries, in ms. */
+  private static readonly REQUEST_RETRY_BASE_MS = 500;
+
+  /**
+   * Upstream/transient HTTP statuses that warrant a retry. Excludes 429
+   * (rate limit) because `request()` already pre-emptively waits on a
+   * known-empty bucket; a 429 leaking through means the bucket flipped
+   * mid-request and immediate retry would just hit the same wall.
+   */
+  private static readonly RETRY_STATUS = new Set([500, 502, 503, 504, 522, 524]);
+
+  /**
+   * Wrap `request()` with bounded exponential-backoff retries for transient
+   * upstream failures (502/503/504 Bad Gateway / Service Unavailable /
+   * Gateway Timeout, and the Cloudflare 522/524 family GitHub occasionally
+   * surfaces) and network-level errors (DNS hiccup, connection reset,
+   * AbortError from the per-request 30s timeout). Without this, a single
+   * 502 on any of the N×(jobs+artifacts) calls during a multi-run sync
+   * aborts the whole job and the user sees
+   * `GitHub API error fetching jobs: 502 when fetching last 10 runs`.
+   * The caller still inspects `response.ok` and decides whether to treat
+   * the final outcome as fatal.
+   */
+  private async requestWithRetry(
+    path: string,
+    token: string,
+    query: Record<string, string> | undefined,
+    label: string,
+  ): Promise<Response> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= GitHubConnector.REQUEST_MAX_ATTEMPTS; attempt++) {
+      try {
+        const response = await this.request(path, token, query);
+        const transient = GitHubConnector.RETRY_STATUS.has(response.status);
+        if (!transient || attempt === GitHubConnector.REQUEST_MAX_ATTEMPTS) {
+          return response;
+        }
+        // Drain the body so the underlying socket can be reused for the
+        // next attempt instead of being held until GC.
+        await response.body?.cancel?.().catch(() => undefined);
+        const delay = this.computeRetryDelay(attempt, response.headers.get('retry-after'));
+        this.logger.warn(
+          `[${label}] HTTP ${response.status} from GitHub (attempt ${attempt}/${GitHubConnector.REQUEST_MAX_ATTEMPTS}); retrying in ${delay}ms`,
+        );
+        await this.sleep(delay);
+      } catch (err) {
+        lastError = err;
+        if (attempt === GitHubConnector.REQUEST_MAX_ATTEMPTS) throw err;
+        const delay = this.computeRetryDelay(attempt);
+        this.logger.warn(
+          `[${label}] network error "${err instanceof Error ? err.message : String(err)}" ` +
+          `(attempt ${attempt}/${GitHubConnector.REQUEST_MAX_ATTEMPTS}); retrying in ${delay}ms`,
+        );
+        await this.sleep(delay);
+      }
+    }
+    // Unreachable: the loop either returns or throws on the last iteration.
+    throw lastError ?? new Error(`requestWithRetry: exhausted ${GitHubConnector.REQUEST_MAX_ATTEMPTS} attempts`);
+  }
+
+  private computeRetryDelay(attempt: number, retryAfterHeader?: string | null): number {
+    // Respect Retry-After when GitHub provides one (capped so a long
+    // server-suggested wait doesn't stall the whole sync window).
+    if (retryAfterHeader) {
+      const sec = parseInt(retryAfterHeader, 10);
+      if (Number.isFinite(sec) && sec > 0) return Math.min(sec * 1000, 30_000);
+    }
+    // Deterministic exponential backoff (no jitter — keeps unit tests
+    // stable; sync workers don't run in herds, so jitter wouldn't add
+    // much). attempt=1 → 500ms, 2 → 1000ms, 3 → 2000ms (last attempt
+    // returns the response, so 2000ms is the largest delay actually
+    // waited in practice).
+    return GitHubConnector.REQUEST_RETRY_BASE_MS * 2 ** (attempt - 1);
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
   private checkRateLimit(response: Response): void {
     const remaining = response.headers.get('x-ratelimit-remaining');
     const resetEpoch = response.headers.get('x-ratelimit-reset');
@@ -614,7 +698,7 @@ export class GitHubConnector implements IQODConnector {
     }
 
     this.logger.log(`Fetching workflow runs: ${basePath} query=${JSON.stringify(query)}`);
-    const response = await this.request(basePath, creds.token, query);
+    const response = await this.requestWithRetry(basePath, creds.token, query, 'workflow-runs');
     this.checkRateLimit(response);
 
     if (!response.ok) {
@@ -649,7 +733,7 @@ export class GitHubConnector implements IQODConnector {
     }
 
     this.logger.log(`Fetching branch workflow runs: ${basePath} branch=${branch} query=${JSON.stringify(query)}`);
-    const response = await this.request(basePath, creds.token, query);
+    const response = await this.requestWithRetry(basePath, creds.token, query, 'branch-workflow-runs');
     this.checkRateLimit(response);
 
     if (!response.ok) {
@@ -667,10 +751,11 @@ export class GitHubConnector implements IQODConnector {
     creds: GitHubCredentials,
     runId: number,
   ): Promise<GitHubJob[]> {
-    const response = await this.request(
+    const response = await this.requestWithRetry(
       `/repos/${creds.owner}/${creds.repo}/actions/runs/${runId}/jobs`,
       creds.token,
       { per_page: '100' },
+      `jobs/run-${runId}`,
     );
 
     this.checkRateLimit(response);
@@ -689,10 +774,11 @@ export class GitHubConnector implements IQODConnector {
     creds: GitHubCredentials,
     runId: number,
   ): Promise<GitHubArtifact[]> {
-    const response = await this.request(
+    const response = await this.requestWithRetry(
       `/repos/${creds.owner}/${creds.repo}/actions/runs/${runId}/artifacts`,
       creds.token,
       { per_page: '100' },
+      `artifacts/run-${runId}`,
     );
 
     this.checkRateLimit(response);

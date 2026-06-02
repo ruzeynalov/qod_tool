@@ -1656,6 +1656,124 @@ describe('GitHubConnector', () => {
     });
   });
 
+  // ──────────────── Transient retries ────────────────
+
+  describe('transient HTTP retries (RUZ-31)', () => {
+    // Speed up retries in tests — production uses 500ms/1000ms/2000ms, which
+    // would make these specs slow without buying any real signal.
+    beforeEach(() => {
+      (connector as any).sleep = () => Promise.resolve();
+    });
+
+    it('retries fetchJobsForRun on a 502 from GitHub and succeeds on the second attempt', async () => {
+      // Reproduces the user-reported failure on a 10-run sync of
+      // apache/fineract: one of the per-run `/jobs` calls returned 502,
+      // which previously aborted the entire sync with
+      // `GitHub API error fetching jobs: 502`. The connector should now
+      // transparently retry transient upstream errors instead.
+      const run = mockWorkflowRun({ id: 200200 });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      // First /jobs call: 502 Bad Gateway. Second call: success.
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/200200/jobs')
+        .query(true)
+        .reply(502, 'Bad Gateway');
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/200200/jobs')
+        .query(true)
+        .reply(200, { jobs: [{ id: 1, name: 'E2E Tests (Shard 1 of 1)', conclusion: 'success', started_at: '2025-01-15T10:00:00Z', completed_at: '2025-01-15T10:05:00Z' }] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/200200/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [] });
+
+      const config = makeConfig({
+        credentials: {
+          token: 'ghp_testtoken123',
+          owner: 'my-org',
+          repo: 'my-repo',
+          workflowFile: 'e2e.yml',
+          branch: 'develop',
+          maxRuns: 1,
+        },
+      });
+      const results = await connector.fetchTestRuns!(config);
+      expect(results).toHaveLength(1);
+      // All nocks consumed → second-attempt success is what actually ran.
+      expect(nock.isDone()).toBe(true);
+    });
+
+    it('gives up after 3 attempts and surfaces the original error message', async () => {
+      // After exhausting retries on a hard upstream failure, the connector
+      // should still throw the same `GitHub API error fetching jobs: 502`
+      // shape it threw before — so existing SyncService error-handling
+      // (lastSyncError, ConnectorStatus=ERROR) keeps working.
+      const run = mockWorkflowRun({ id: 200201 });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      // Three persistent 502s — one per attempt.
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/200201/jobs')
+        .query(true)
+        .times(3)
+        .reply(502, 'Bad Gateway');
+
+      const config = makeConfig({
+        credentials: {
+          token: 'ghp_testtoken123',
+          owner: 'my-org',
+          repo: 'my-repo',
+          workflowFile: 'e2e.yml',
+          branch: 'develop',
+          maxRuns: 1,
+        },
+      });
+      await expect(connector.fetchTestRuns!(config)).rejects.toThrow(/fetching jobs: 502/);
+      expect(nock.isDone()).toBe(true);
+    });
+
+    it('does not retry a 4xx response (no point — client error)', async () => {
+      // 404 means the workflow run was deleted or the token lost access.
+      // Retrying just wastes time and rate-limit quota.
+      const run = mockWorkflowRun({ id: 200202 });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/200202/jobs')
+        .query(true)
+        .reply(404, 'Not Found');
+
+      const config = makeConfig({
+        credentials: {
+          token: 'ghp_testtoken123',
+          owner: 'my-org',
+          repo: 'my-repo',
+          workflowFile: 'e2e.yml',
+          branch: 'develop',
+          maxRuns: 1,
+        },
+      });
+      await expect(connector.fetchTestRuns!(config)).rejects.toThrow(/fetching jobs: 404/);
+      // Only one /jobs call was consumed; the spec would still pass if more
+      // had been registered, so explicitly assert nock's pending list to
+      // catch a regression where 4xx accidentally became retryable.
+      expect(nock.pendingMocks()).toHaveLength(0);
+    });
+  });
+
   // ──────────────── Rate limiting ────────────────
 
   describe('rate limiting', () => {
