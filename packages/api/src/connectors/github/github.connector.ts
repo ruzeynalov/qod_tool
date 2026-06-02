@@ -747,6 +747,9 @@ export class GitHubConnector implements IQODConnector {
     return data.workflow_runs.slice(0, maxRuns);
   }
 
+  /** Upper bound on pages fetched from /jobs?filter=all (per_page=100 → ≤1000 raw jobs). */
+  private static readonly JOBS_MAX_PAGES = 10;
+
   private async fetchJobsForRun(
     creds: GitHubCredentials,
     runId: number,
@@ -763,21 +766,60 @@ export class GitHubConnector implements IQODConnector {
     // broken filter entirely. `filter=all` returns jobs from every
     // attempt, so we collapse them back to the latest-attempt-per-name
     // view that `filter=latest` was supposed to give us.
-    const response = await this.requestWithRetry(
-      `/repos/${creds.owner}/${creds.repo}/actions/runs/${runId}/jobs`,
-      creds.token,
-      { per_page: '100', filter: 'all' },
-      `jobs/run-${runId}`,
-    );
+    //
+    // `filter=all` returns up to `job_count × attempt_count` rows, which
+    // routinely exceeds the GitHub-imposed 100-per-page cap (Codex review
+    // on PR #20: 174 rows total for fineract #726, 100 on page 1 + 74 on
+    // page 2). Page through `?page=N` until exhausted so dedup sees every
+    // attempt, otherwise the latest attempt of some shards could sit on
+    // a later page and we'd silently keep a stale attempt-1 row.
+    //
+    // Best-effort pagination: a hard upstream error on page ≥ 2 (the
+    // same GitHub bug that made us switch to `filter=all` is also
+    // observed on some `?page=2` requests of the same run) falls back to
+    // the pages already collected with a warning, rather than aborting
+    // the whole sync. Page 1 still throws because zero data would
+    // produce wrong shard-count fallbacks downstream.
+    const allJobs: GitHubJob[] = [];
+    let stoppedEarly: { page: number; reason: string } | null = null;
+    for (let page = 1; page <= GitHubConnector.JOBS_MAX_PAGES; page++) {
+      const response = await this.requestWithRetry(
+        `/repos/${creds.owner}/${creds.repo}/actions/runs/${runId}/jobs`,
+        creds.token,
+        { per_page: '100', filter: 'all', page: String(page) },
+        `jobs/run-${runId}/page-${page}`,
+      );
 
-    this.checkRateLimit(response);
+      this.checkRateLimit(response);
 
-    if (!response.ok) {
-      throw new Error(`GitHub API error fetching jobs: ${response.status}`);
+      if (!response.ok) {
+        if (page === 1) {
+          throw new Error(`GitHub API error fetching jobs: ${response.status}`);
+        }
+        stoppedEarly = { page, reason: `HTTP ${response.status}` };
+        break;
+      }
+
+      const data = await response.json() as { jobs: GitHubJob[]; total_count?: number };
+      allJobs.push(...data.jobs);
+
+      // Stop when GitHub returns a partial page (no more rows) or when we
+      // have already covered `total_count` (handles small variations in
+      // page size at the tail).
+      const fullPage = data.jobs.length >= 100;
+      const reachedTotal = data.total_count != null && allJobs.length >= data.total_count;
+      if (!fullPage || reachedTotal) break;
     }
 
-    const data = await response.json() as { jobs: GitHubJob[] };
-    return this.dedupJobsByLatestAttempt(data.jobs);
+    if (stoppedEarly) {
+      this.logger.warn(
+        `jobs/run-${runId}: stopped paginating at page ${stoppedEarly.page} (${stoppedEarly.reason}); ` +
+        `using ${allJobs.length} jobs collected from earlier pages. ` +
+        `Latest-attempt dedup still applies, but a shard whose latest attempt fell on the dropped page may show its earlier attempt's conclusion.`,
+      );
+    }
+
+    return this.dedupJobsByLatestAttempt(allJobs);
   }
 
   /**

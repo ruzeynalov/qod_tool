@@ -1837,6 +1837,186 @@ describe('GitHubConnector', () => {
       }));
       expect(nock.isDone()).toBe(true);
     });
+
+    it('paginates /jobs?filter=all when the result exceeds 100 rows so dedup sees every attempt (Codex review on #20)', async () => {
+      // With `filter=all` the response size is roughly job_count × attempt_count.
+      // For real-world re-attempted runs (fineract #726 → 174 rows across 2
+      // pages, verified empirically), the latest attempt of some shards can
+      // land on page 2+. If we read only page 1 the dedup would keep a stale
+      // attempt-1 entry for those shards, which silently misreports failed
+      // shards as passed. This spec covers that path: latest attempt of
+      // shard 99 only appears on page 2.
+      const run = mockWorkflowRun({ id: 300302 });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      // Page 1: 100 rows covering 100 unique shards. Shards 1-99 passed on
+      // attempt 1; shard 100 failed on attempt 1 — its attempt 2 (success)
+      // does NOT fit on this page (page 1 is full).
+      const page1Jobs: any[] = [];
+      for (let i = 1; i <= 99; i++) {
+        page1Jobs.push({
+          id: 1000 + i,
+          name: `E2E Tests (Shard ${i} of 100)`,
+          conclusion: 'success',
+          started_at: '2025-01-15T10:00:00Z',
+          completed_at: '2025-01-15T10:05:00Z',
+          run_attempt: 1,
+        });
+      }
+      page1Jobs.push({
+        id: 1100,
+        name: 'E2E Tests (Shard 100 of 100)',
+        conclusion: 'failure',
+        started_at: '2025-01-15T10:00:00Z',
+        completed_at: '2025-01-15T10:05:00Z',
+        run_attempt: 1,
+      });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/300302/jobs')
+        .query((q) => q.filter === 'all' && q.page === '1')
+        .reply(200, { total_count: 101, jobs: page1Jobs });
+
+      // Page 2: 1 row — shard 100's attempt 2, which succeeded. After
+      // dedup we expect to keep this one (highest run_attempt for the
+      // name).
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/300302/jobs')
+        .query((q) => q.filter === 'all' && q.page === '2')
+        .reply(200, {
+          total_count: 101,
+          jobs: [{
+            id: 2100,
+            name: 'E2E Tests (Shard 100 of 100)',
+            conclusion: 'success',
+            started_at: '2025-01-15T11:00:00Z',
+            completed_at: '2025-01-15T11:05:00Z',
+            run_attempt: 2,
+          }],
+        });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/300302/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [] });
+
+      const config = makeConfig({
+        credentials: {
+          token: 'ghp_testtoken123',
+          owner: 'my-org',
+          repo: 'my-repo',
+          workflowFile: 'e2e.yml',
+          branch: 'develop',
+          maxRuns: 1,
+        },
+      });
+      const results = await connector.fetchTestRuns!(config);
+      expect(results).toHaveLength(1);
+      // 100 unique shards, all passing once the latest attempt for shard 99
+      // is taken from page 2. If pagination is broken we would have seen
+      // "1 failed shard" here, not "(100 shards passed)".
+      expect(results[0].name).toContain('(100 shards passed)');
+      expect(results[0].summaryCounts).toEqual(expect.objectContaining({
+        totalTests: 100,
+        passedCount: 100,
+        failedCount: 0,
+      }));
+      expect(nock.isDone()).toBe(true);
+    });
+
+    it('falls back to earlier pages when /jobs?filter=all page 2 returns a hard 5xx (real fineract behaviour)', async () => {
+      // Empirical on 2026-06-02: for fineract #726, page 1 of
+      // /jobs?filter=all returns 200 with 100 jobs (covering every
+      // unique shard name) while page 2 itself returns 502 even though
+      // the Link header advertises it. Without graceful fallback the
+      // sync would still abort despite already having a usable result
+      // set. Use sleep override so the retry inside requestWithRetry
+      // is instant.
+      (connector as any).sleep = () => Promise.resolve();
+      const run = mockWorkflowRun({ id: 300303 });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      const page1Jobs = Array.from({ length: 100 }, (_, i) => ({
+        id: 1000 + i,
+        name: `E2E Tests (Shard ${i + 1} of 100)`,
+        conclusion: 'success',
+        started_at: '2025-01-15T11:00:00Z',
+        completed_at: '2025-01-15T11:05:00Z',
+        run_attempt: 2,
+      }));
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/300303/jobs')
+        .query((q) => q.filter === 'all' && q.page === '1')
+        .reply(200, { total_count: 174, jobs: page1Jobs });
+
+      // Page 2: three 502s in a row (retry exhausted).
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/300303/jobs')
+        .query((q) => q.filter === 'all' && q.page === '2')
+        .times(3)
+        .reply(502, 'Bad Gateway');
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/300303/artifacts')
+        .query(true)
+        .reply(200, { artifacts: [] });
+
+      const config = makeConfig({
+        credentials: {
+          token: 'ghp_testtoken123',
+          owner: 'my-org',
+          repo: 'my-repo',
+          workflowFile: 'e2e.yml',
+          branch: 'develop',
+          maxRuns: 1,
+        },
+      });
+      const results = await connector.fetchTestRuns!(config);
+      // Sync completes (does not throw) using page 1's 100 shards.
+      expect(results).toHaveLength(1);
+      expect(results[0].name).toContain('(100 shards passed)');
+      expect(nock.isDone()).toBe(true);
+    });
+
+    it('throws if /jobs page 1 itself fails (no earlier-page data to fall back on)', async () => {
+      // Page 1 failure means we have nothing — surface the original error
+      // so SyncService records it (existing lastSyncError + ConnectorStatus
+      // = ERROR behaviour).
+      (connector as any).sleep = () => Promise.resolve();
+      const run = mockWorkflowRun({ id: 300304 });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/workflows/e2e.yml/runs')
+        .query(true)
+        .reply(200, { workflow_runs: [run] });
+
+      nock(GITHUB_API)
+        .get('/repos/my-org/my-repo/actions/runs/300304/jobs')
+        .query((q) => q.filter === 'all' && q.page === '1')
+        .times(3)
+        .reply(502, 'Bad Gateway');
+
+      const config = makeConfig({
+        credentials: {
+          token: 'ghp_testtoken123',
+          owner: 'my-org',
+          repo: 'my-repo',
+          workflowFile: 'e2e.yml',
+          branch: 'develop',
+          maxRuns: 1,
+        },
+      });
+      await expect(connector.fetchTestRuns!(config)).rejects.toThrow(/fetching jobs: 502/);
+      expect(nock.isDone()).toBe(true);
+    });
   });
 
   // ──────────────── Rate limiting ────────────────
